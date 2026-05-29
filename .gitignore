@@ -1,0 +1,30 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.env
+
+# Data & artifacts
+manifests/
+frames/
+audio/
+checkpoints/
+runs/
+*.pt
+*.pth
+*.ckpt
+
+# Datasets (raw)
+data/raw/
+FaceForensics++/
+Celeb-DF*/
+DFDC*/
+FakeAVCeleb*/
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/
+*.swp

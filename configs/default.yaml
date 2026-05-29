@@ -1,0 +1,36 @@
+seed: 42
+
+data:
+  manifest_train: manifests/train.csv
+  manifest_val: manifests/val.csv
+  manifest_test: manifests/test.csv
+  frame_root: frames/
+  audio_root: audio/
+  num_frames: 16
+  frame_size: 224
+  audio_sample_rate: 16000
+  audio_seconds: 4.0
+  num_workers: 4
+  batch_size: 8
+
+model:
+  patch_size: 16
+  embed_dim: 384
+  spatial_depth: 6
+  temporal_depth: 4
+  num_heads: 6
+  mlp_ratio: 4.0
+  dropout: 0.1
+  audio_embed_dim: 256
+  fusion_dim: 512
+
+train:
+  epochs: 30
+  lr: 1.0e-4
+  weight_decay: 0.05
+  warmup_epochs: 2
+  grad_clip: 1.0
+  amp: true
+  log_dir: runs/
+  ckpt_dir: checkpoints/
+  sync_loss_weight: 0.2
