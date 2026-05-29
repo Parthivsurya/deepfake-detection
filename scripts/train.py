@@ -55,6 +55,9 @@ def build_model(cfg: dict) -> MultimodalDeepfakeDetector:
         audio_sample_rate=cfg["data"]["audio_sample_rate"],
         audio_embed_dim=m["audio_embed_dim"],
         fusion_dim=m["fusion_dim"],
+        fusion_depth=m.get("fusion_depth", 2),
+        fusion_heads=m.get("fusion_heads", 8),
+        max_audio_tokens=m.get("max_audio_tokens", 256),
     )
 
 

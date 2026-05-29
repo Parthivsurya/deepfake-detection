@@ -23,6 +23,9 @@ model:
   dropout: 0.1
   audio_embed_dim: 256
   fusion_dim: 512
+  fusion_depth: 2
+  fusion_heads: 8
+  max_audio_tokens: 256
 
 train:
   epochs: 30
