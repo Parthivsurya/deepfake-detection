@@ -1,7 +1,7 @@
 # Adversarial Robust Real-Time Multimodal Deepfake Detection
 
 Module 1 (Core Deepfake Detection & Mathematical Modelling) — Tasks 1–6 done.
-Module 2 (Adversarial Robustness & Diffusion Reconstruction) — Task 1 done.
+Module 2 (Adversarial Robustness & Diffusion Reconstruction) — Tasks 1–3 done.
 
 ## Status
 
@@ -20,7 +20,7 @@ Module 2 (Adversarial Robustness & Diffusion Reconstruction) — Task 1 done.
 |---|---|---|
 | 1 | Adversarial Attack Generation (FGSM, PGD, CW, DeepFool) | done |
 | 2 | Adversarial Failure Analysis | done |
-| 3 | Diffusion Reconstruction Module | pending |
+| 3 | Diffusion Reconstruction Module | done |
 | 4 | Continual Learning Module | pending |
 | 5 | Mathematical Robustness Modeling | pending |
 | 6 | Robustness Evaluation | pending |
@@ -45,6 +45,12 @@ adversarial/
   attacks.py              FGSM, PGD, CW-L2, DeepFool (uniform BaseAttack API)
   evaluation.py           clean vs adversarial accuracy + ASR + norm stats
   analysis.py             epsilon sweep, norm buckets, JPEG robustness, per-class
+diffusion/
+  schedule.py             DDPM linear/cosine beta schedule + q_sample
+  unet.py                 compact 3-level UNet noise predictor ε_θ(x_t, t)
+  ddpm.py                 DDPM training loss + DiffPure purify()
+  perturbation_detector.py    Laplacian-energy heuristic + small CNN detector
+  pipeline.py             detect -> purify -> re-verify -> trust score
 scripts/
   prepare_datasets.py     build manifests + identity-grouped splits
   extract_frames.py       face-crop frames and audio demux
@@ -53,6 +59,7 @@ scripts/
   evaluate.py             full evaluation report (metrics + per-dataset + latency)
   run_attacks.py          adversarial robustness sweep (FGSM/PGD/CW/DeepFool)
   failure_analysis.py     epsilon sweep + norm buckets + JPEG compression + per-class
+  run_recovery.py         diffusion-based forensic recovery (perturb. detect + purify + re-verify)
 utils/
   video_utils.py          PyAV/OpenCV video I/O
   audio_utils.py          waveform + log-mel helpers
@@ -75,6 +82,7 @@ python -m tests.test_optimization
 python -m tests.test_metrics
 python -m tests.test_attacks
 python -m tests.test_failure_analysis
+python -m tests.test_diffusion
 ```
 
 ## Full workflow
@@ -199,6 +207,50 @@ Produces a single JSON report with five diagnostics:
 * **`per_class`** — real-vs-fake clean accuracy and ASR breakdown. Often
   asymmetric: detectors tend to be easier to fool toward the "real" class
   than toward "fake".
+
+### 8. Diffusion-based forensic recovery (Module 2 Task 3)
+
+```bash
+python scripts/run_recovery.py \
+    --config configs/default.yaml \
+    --manifest manifests/test.extracted.csv \
+    --ckpt checkpoints/best.pt \
+    --t_star 50 \
+    --recon_threshold 0.5 \
+    --adversarial_attack pgd --epsilon 0.03 \
+    --out results/recovery.json
+```
+
+The recovery pipeline runs four stages per clip:
+
+1. **Perturbation detection** — `HeuristicPerturbationDetector` measures the
+   mean absolute Laplacian (high-frequency energy). Adversarial perturbations
+   are high-frequency, so they raise this signal above clean baseline. The
+   score is `σ((energy − threshold) / temperature) ∈ [0, 1]`. The threshold
+   is auto-calibrated to `mean + k·std` of a few clean batches at script
+   startup. A trained CNN variant (`LearnablePerturbationDetector`) is also
+   provided.
+
+2. **Forensic reconstruction (DiffPure)** — clips whose perturbation score
+   exceeds `--recon_threshold` are passed through `DDPM.purify()`. We add
+   Gaussian noise up to timestep `t_star` (the forward `q_sample`) and then
+   run the full reverse process back to `t = 0`. Small `t_star` preserves
+   semantics while erasing high-frequency adversarial noise; larger `t_star`
+   purifies more aggressively at the cost of legitimate detail.
+
+3. **Re-verification** — the detector is run a second time on the
+   reconstructed frames, producing `p_recon_fake`.
+
+4. **Final blend + trust score** — outputs are combined as
+   `p_final = (1 − p_pert) · p_orig + p_pert · p_recon`, and the trust
+   score `1 − p_pert` is surfaced as the system's confidence in the raw
+   input (low when the clip looks tampered with).
+
+The script reports `accuracy_raw` (using `p_orig`) vs `accuracy_recovered`
+(using `p_final`); the gap shows how much the diffusion stage buys under the
+chosen attack. The UNet defaults to an untrained `SmallUNet` so the pipeline
+runs end-to-end without a checkpoint — pass `--diffusion_ckpt` once you have
+a trained denoiser.
 
 ## Math
 
