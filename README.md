@@ -19,7 +19,7 @@ Module 2 (Adversarial Robustness & Diffusion Reconstruction) — Task 1 done.
 | # | Task | Status |
 |---|---|---|
 | 1 | Adversarial Attack Generation (FGSM, PGD, CW, DeepFool) | done |
-| 2 | Adversarial Failure Analysis | pending |
+| 2 | Adversarial Failure Analysis | done |
 | 3 | Diffusion Reconstruction Module | pending |
 | 4 | Continual Learning Module | pending |
 | 5 | Mathematical Robustness Modeling | pending |
@@ -44,6 +44,7 @@ models/
 adversarial/
   attacks.py              FGSM, PGD, CW-L2, DeepFool (uniform BaseAttack API)
   evaluation.py           clean vs adversarial accuracy + ASR + norm stats
+  analysis.py             epsilon sweep, norm buckets, JPEG robustness, per-class
 scripts/
   prepare_datasets.py     build manifests + identity-grouped splits
   extract_frames.py       face-crop frames and audio demux
@@ -51,6 +52,7 @@ scripts/
   benchmark.py            latency / FPS / realtime-factor measurement
   evaluate.py             full evaluation report (metrics + per-dataset + latency)
   run_attacks.py          adversarial robustness sweep (FGSM/PGD/CW/DeepFool)
+  failure_analysis.py     epsilon sweep + norm buckets + JPEG compression + per-class
 utils/
   video_utils.py          PyAV/OpenCV video I/O
   audio_utils.py          waveform + log-mel helpers
@@ -72,6 +74,7 @@ python -m tests.test_splits
 python -m tests.test_optimization
 python -m tests.test_metrics
 python -m tests.test_attacks
+python -m tests.test_failure_analysis
 ```
 
 ## Full workflow
@@ -167,6 +170,35 @@ detector and reports clean accuracy, adversarial accuracy, attack success rate,
 and L2 / L∞ perturbation statistics for each. ASR is conditioned on
 clean-correct samples (standard convention). All attacks perturb the visual
 modality only; audio passes through untouched.
+
+### 7. Adversarial failure analysis (Module 2 Task 2)
+
+```bash
+python scripts/failure_analysis.py \
+    --config configs/default.yaml \
+    --manifest manifests/test.extracted.csv \
+    --ckpt checkpoints/best.pt \
+    --epsilons 0.005 0.01 0.02 0.03 0.05 \
+    --jpeg_qualities 95 75 50 25 10 \
+    --out results/failure_analysis.json
+```
+
+Produces a single JSON report with five diagnostics:
+
+* **`epsilon_sweep`** — ASR / adv-accuracy as ε is varied (the classic
+  robustness curve).
+* **`norm_buckets`** — successful adversarials sorted by L2 norm into
+  equal-population buckets. Reveals whether failures cluster at tiny
+  perturbations (severe vulnerability) or only at near-budget ones.
+* **`compression_clean`** — accuracy at decreasing JPEG quality with **no**
+  attack — measures natural-corruption robustness.
+* **`compression_defence`** — accuracy when JPEG is applied **after** an
+  adversarial perturbation. JPEG destroys high-frequency adversarial noise,
+  so this is a cheap baseline defence; the gap between this and
+  `compression_clean` shows how much robustness JPEG actually buys.
+* **`per_class`** — real-vs-fake clean accuracy and ASR breakdown. Often
+  asymmetric: detectors tend to be easier to fool toward the "real" class
+  than toward "fake".
 
 ## Math
 
