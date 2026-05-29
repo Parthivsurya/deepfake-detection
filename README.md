@@ -1,7 +1,7 @@
 # Adversarial Robust Real-Time Multimodal Deepfake Detection
 
 Module 1 (Core Deepfake Detection & Mathematical Modelling) — Tasks 1–6 done.
-Module 2 (Adversarial Robustness & Diffusion Reconstruction) — Tasks 1–4 done.
+Module 2 (Adversarial Robustness & Diffusion Reconstruction) — Tasks 1–5 done.
 
 ## Status
 
@@ -22,7 +22,7 @@ Module 2 (Adversarial Robustness & Diffusion Reconstruction) — Tasks 1–4 don
 | 2 | Adversarial Failure Analysis | done |
 | 3 | Diffusion Reconstruction Module | done |
 | 4 | Continual Learning Module | done |
-| 5 | Mathematical Robustness Modeling | pending |
+| 5 | Mathematical Robustness Modeling | done — see [`docs/robustness.md`](docs/robustness.md) |
 | 6 | Robustness Evaluation | pending |
 
 ## Layout
@@ -56,6 +56,11 @@ continual/
   ewc.py                  Elastic Weight Consolidation (Fisher + anchors)
   drift.py                online drift detector (mean shift + PSI)
   trainer.py              adaptive fine-tuning: new + replay + EWC losses
+robustness/
+  lipschitz.py            per-layer Lipschitz constants + power iteration
+  margins.py              logit margins + Lipschitz-margin certified accuracy
+  randomized_smoothing.py Cohen et al. probabilistic L2 certificate
+  bounds.py               natural / adversarial / boundary risk decomposition
 scripts/
   prepare_datasets.py     build manifests + identity-grouped splits
   extract_frames.py       face-crop frames and audio demux
@@ -66,12 +71,14 @@ scripts/
   failure_analysis.py     epsilon sweep + norm buckets + JPEG compression + per-class
   run_recovery.py         diffusion-based forensic recovery (perturb. detect + purify + re-verify)
   continual_train.py      adaptive fine-tuning over a task stream (replay + EWC + drift)
+  robustness_analysis.py  Lipschitz + margins + smoothing certificates + risk decomp
 utils/
   video_utils.py          PyAV/OpenCV video I/O
   audio_utils.py          waveform + log-mel helpers
   metrics.py              accuracy / F1 / AUC / EER / latency summary
 docs/
   math.md                 paper-ready equations for the backbone + fusion
+  robustness.md           Lipschitz + smoothing certificates + risk decomposition
 tests/                    synthetic-data smoke tests (no datasets needed)
 ```
 
@@ -90,6 +97,7 @@ python -m tests.test_attacks
 python -m tests.test_failure_analysis
 python -m tests.test_diffusion
 python -m tests.test_continual
+python -m tests.test_robustness
 ```
 
 ## Full workflow
@@ -307,11 +315,58 @@ standard continual-learning metrics:
   $\text{acc}[T{-}1][k] - \text{acc}[k][k]$ for $k < T{-}1$; negative
   values quantify forgetting.
 
+### 10. Mathematical robustness analysis (Module 2 Task 5)
+
+```bash
+python scripts/robustness_analysis.py \
+    --config configs/default.yaml \
+    --manifest manifests/test.extracted.csv \
+    --ckpt checkpoints/best.pt \
+    --attack pgd --epsilon 0.03 \
+    --sigma 0.25 --n_smoothing_samples 500 --max_smoothing_clips 16 \
+    --radii 0.0 0.01 0.05 0.1 0.25 0.5 1.0 \
+    --out results/robustness.json
+```
+
+Produces the **four** robustness quantities from
+[`docs/robustness.md`](docs/robustness.md):
+
+* **`lipschitz`** — per-layer 2-norms via `linear_spectral_norm` /
+  `conv_spectral_norm` (power iteration on the conv operator). The
+  product bound is reported over the *bounded* subset of the network;
+  `MultiheadAttention` layers are flagged as unbounded because softmax
+  self-attention has no global $L$ (Kim, Papamakarios, Mnih 2021). The
+  CLI uses forward hooks (`infer_conv_input_shapes`) to capture the exact
+  input shape of every conv, so layered conv stacks with varying
+  in-channels (like the audio encoder) are handled correctly.
+
+* **`certified_accuracy_lipschitz`** — the Tsuzuku-style empirical curve
+  $\mathrm{CA}(r) = \tfrac{1}{N}\sum \mathbb{1}\{\hat y_i = y_i \wedge
+  m(x_i)/(\sqrt{2}L) \ge r\}$ at the requested radii.
+
+* **`randomized_smoothing`** — Cohen-style probabilistic L2 certificates
+  on a small subset (smoothing is expensive: $n_0 + n$ forward passes per
+  clip). Each row is `(label, predicted, certified_radius, abstain)`;
+  `ABSTAIN` means the Clopper-Pearson lower bound on $p_A$ fell below
+  $1/2$ at confidence $1 - \alpha$, so no certificate is possible. The
+  smoothing noise hits the frame tensor only — audio passes through
+  clean, matching the visual-only threat model used by the attacks.
+
+* **`risk_decomposition`** — $R_\mathrm{nat}$, empirical
+  $\widehat R_\mathrm{adv}$ under the chosen attack, and the boundary
+  risk $R_\mathrm{bd} = \widehat R_\mathrm{adv} - R_\mathrm{nat}$. The
+  boundary risk isolates the *robustness gap* — failures that exist only
+  because the adversary moves clean-correct samples across the decision
+  boundary.
+
 ## Math
 
 Formal equations for the temporal backbone and cross-attention fusion are in
-[`docs/math.md`](docs/math.md). Every symbol is cross-referenced to the
-implementation file it lives in, so the doc stays in sync with the code.
+[`docs/math.md`](docs/math.md). The robustness theory — Lipschitz bounds,
+randomized smoothing certificates, and the natural / adversarial / boundary
+risk decomposition — is in [`docs/robustness.md`](docs/robustness.md). Every
+symbol is cross-referenced to the implementation file it lives in, so the
+docs stay in sync with the code.
 
 ## Configuration
 
