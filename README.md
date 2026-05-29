@@ -49,3 +49,8 @@ python scripts/train.py --config configs/default.yaml
 ```
 
 See `configs/default.yaml` for all knobs.
+
+## Math
+Formal equations for Temporal Feature Encoding and Cross-Attention Fusion are
+in [`docs/math.md`](docs/math.md). Each symbol there is cross-referenced to the
+implementation file it lives in.
