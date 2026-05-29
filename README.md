@@ -1,7 +1,7 @@
 # Adversarial Robust Real-Time Multimodal Deepfake Detection
 
 Module 1 (Core Deepfake Detection & Mathematical Modelling) — Tasks 1–6 done.
-Module 2 (Adversarial Robustness & Diffusion Reconstruction) — Tasks 1–3 done.
+Module 2 (Adversarial Robustness & Diffusion Reconstruction) — Tasks 1–4 done.
 
 ## Status
 
@@ -21,7 +21,7 @@ Module 2 (Adversarial Robustness & Diffusion Reconstruction) — Tasks 1–3 don
 | 1 | Adversarial Attack Generation (FGSM, PGD, CW, DeepFool) | done |
 | 2 | Adversarial Failure Analysis | done |
 | 3 | Diffusion Reconstruction Module | done |
-| 4 | Continual Learning Module | pending |
+| 4 | Continual Learning Module | done |
 | 5 | Mathematical Robustness Modeling | pending |
 | 6 | Robustness Evaluation | pending |
 
@@ -51,6 +51,11 @@ diffusion/
   ddpm.py                 DDPM training loss + DiffPure purify()
   perturbation_detector.py    Laplacian-energy heuristic + small CNN detector
   pipeline.py             detect -> purify -> re-verify -> trust score
+continual/
+  memory_buffer.py        reservoir + class-balanced replay buffers
+  ewc.py                  Elastic Weight Consolidation (Fisher + anchors)
+  drift.py                online drift detector (mean shift + PSI)
+  trainer.py              adaptive fine-tuning: new + replay + EWC losses
 scripts/
   prepare_datasets.py     build manifests + identity-grouped splits
   extract_frames.py       face-crop frames and audio demux
@@ -60,6 +65,7 @@ scripts/
   run_attacks.py          adversarial robustness sweep (FGSM/PGD/CW/DeepFool)
   failure_analysis.py     epsilon sweep + norm buckets + JPEG compression + per-class
   run_recovery.py         diffusion-based forensic recovery (perturb. detect + purify + re-verify)
+  continual_train.py      adaptive fine-tuning over a task stream (replay + EWC + drift)
 utils/
   video_utils.py          PyAV/OpenCV video I/O
   audio_utils.py          waveform + log-mel helpers
@@ -83,6 +89,7 @@ python -m tests.test_metrics
 python -m tests.test_attacks
 python -m tests.test_failure_analysis
 python -m tests.test_diffusion
+python -m tests.test_continual
 ```
 
 ## Full workflow
@@ -251,6 +258,54 @@ The script reports `accuracy_raw` (using `p_orig`) vs `accuracy_recovered`
 chosen attack. The UNet defaults to an untrained `SmallUNet` so the pipeline
 runs end-to-end without a checkpoint — pass `--diffusion_ckpt` once you have
 a trained denoiser.
+
+### 9. Continual / adaptive fine-tuning (Module 2 Task 4)
+
+```bash
+python scripts/continual_train.py \
+    --config configs/default.yaml \
+    --ckpt checkpoints/best.pt \
+    --tasks manifests/ffpp.csv manifests/celebdf.csv manifests/dfdc.csv \
+        manifests/fakeavceleb.csv \
+    --epochs 1 --lr 1e-4 \
+    --replay_lambda 1.0 --replay_capacity 256 \
+    --ewc_lambda 1000.0 \
+    --out results/continual.json
+```
+
+The continual stack has four pieces:
+
+* **`ReplayBuffer` / `ClassBalancedReplayBuffer`** — reservoir-sampled
+  exemplar buffer. Each new sample is kept with probability `capacity/seen`
+  so the buffer stays a uniform random subset of the full stream. The
+  class-balanced variant keeps one buffer per label so a skewed new task
+  can't push the minority class out.
+
+* **`ElasticWeightConsolidation`** — estimates the diagonal Fisher
+  information $F_i$ on each finished task and adds a quadratic penalty
+  $\tfrac{\lambda}{2}\sum_i F_i (\theta_i - \theta_i^*)^2$ around the
+  post-task parameters $\theta^*$. Fisher entries accumulate across tasks,
+  so weights important to *any* prior task stay anchored.
+
+* **`DriftDetector`** — sliding-window monitor over detector
+  $p(\text{fake})$ scores. Triggers when either the mean shifts by more
+  than $k$ reference-stds *or* the population-stability index (PSI) exceeds
+  a threshold. Use it to decide when to actually invoke the continual
+  trainer in production rather than retraining on a fixed cadence.
+
+* **`ContinualTrainer`** — wraps optimizer + buffer + EWC. Each step
+  computes $\mathcal{L} = \text{CE}(\text{new}) + \lambda_{\text{replay}}
+  \cdot \text{CE}(\text{replay}) + \lambda_{\text{EWC}} \cdot
+  \mathcal{L}_{\text{EWC}}$, with both regularization terms optional.
+
+The script's JSON report includes the full $T \times T$ accuracy matrix
+(accuracy on task $k$ after training task $t$), so you can compute the
+standard continual-learning metrics:
+
+* **Average final accuracy** — mean of the last row.
+* **Backward transfer (BWT)** — average of
+  $\text{acc}[T{-}1][k] - \text{acc}[k][k]$ for $k < T{-}1$; negative
+  values quantify forgetting.
 
 ## Math
 
