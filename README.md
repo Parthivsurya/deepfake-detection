@@ -1,10 +1,11 @@
 # Adversarial Robust Real-Time Multimodal Deepfake Detection
 
-Module 1 (Core Deepfake Detection & Mathematical Modelling) — Tasks 1–6.
-Module 2 (Adversarial Robustness & Diffusion Reconstruction) is upcoming.
+Module 1 (Core Deepfake Detection & Mathematical Modelling) — Tasks 1–6 done.
+Module 2 (Adversarial Robustness & Diffusion Reconstruction) — Task 1 done.
 
 ## Status
 
+### Module 1 — Core Detection
 | # | Task | Status |
 |---|---|---|
 | 1 | Dataset Preparation (FF++, Celeb-DF, DFDC, FakeAVCeleb) | done |
@@ -13,6 +14,16 @@ Module 2 (Adversarial Robustness & Diffusion Reconstruction) is upcoming.
 | 4 | Mathematical Modeling | done — see [`docs/math.md`](docs/math.md) |
 | 5 | Real-Time Optimization (pruning + INT8 + benchmark) | done |
 | 6 | Performance Evaluation (Acc / F1 / AUC / FPS / latency) | done |
+
+### Module 2 — Adversarial Robustness & Diffusion Reconstruction
+| # | Task | Status |
+|---|---|---|
+| 1 | Adversarial Attack Generation (FGSM, PGD, CW, DeepFool) | done |
+| 2 | Adversarial Failure Analysis | pending |
+| 3 | Diffusion Reconstruction Module | pending |
+| 4 | Continual Learning Module | pending |
+| 5 | Mathematical Robustness Modeling | pending |
+| 6 | Robustness Evaluation | pending |
 
 ## Layout
 
@@ -30,12 +41,16 @@ models/
   cross_attention_fusion.py   bidirectional V<->A cross-attention fusion
   detector.py             full multimodal detector
   optimization.py         pruning, dynamic INT8 quantization, sparsity helpers
+adversarial/
+  attacks.py              FGSM, PGD, CW-L2, DeepFool (uniform BaseAttack API)
+  evaluation.py           clean vs adversarial accuracy + ASR + norm stats
 scripts/
   prepare_datasets.py     build manifests + identity-grouped splits
   extract_frames.py       face-crop frames and audio demux
   train.py                AMP training loop (cosine LR, joint detection+sync loss)
   benchmark.py            latency / FPS / realtime-factor measurement
   evaluate.py             full evaluation report (metrics + per-dataset + latency)
+  run_attacks.py          adversarial robustness sweep (FGSM/PGD/CW/DeepFool)
 utils/
   video_utils.py          PyAV/OpenCV video I/O
   audio_utils.py          waveform + log-mel helpers
@@ -56,6 +71,7 @@ python -m tests.test_cross_attention
 python -m tests.test_splits
 python -m tests.test_optimization
 python -m tests.test_metrics
+python -m tests.test_attacks
 ```
 
 ## Full workflow
@@ -134,6 +150,23 @@ python scripts/benchmark.py --config configs/default.yaml --device cpu \
 
 `evaluate.py` accepts the same `--prune` / `--quantize` flags, so you can score
 the optimized variant on real metrics, not just synthetic timings.
+
+### 6. Adversarial robustness sweep (Module 2 Task 1)
+
+```bash
+python scripts/run_attacks.py \
+    --config configs/default.yaml \
+    --manifest manifests/test.extracted.csv \
+    --ckpt checkpoints/best.pt \
+    --epsilon 0.03 \
+    --out results/attacks.json
+```
+
+Runs **FGSM**, **PGD**, **CW-L2**, and **DeepFool** against the trained
+detector and reports clean accuracy, adversarial accuracy, attack success rate,
+and L2 / L∞ perturbation statistics for each. ASR is conditioned on
+clean-correct samples (standard convention). All attacks perturb the visual
+modality only; audio passes through untouched.
 
 ## Math
 
