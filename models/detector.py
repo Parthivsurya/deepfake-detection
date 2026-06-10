@@ -8,6 +8,7 @@ from .temporal_vit import TemporalViT
 from .audio_encoder import build_audio_encoder
 from .av_sync import AVSyncHead
 from .cross_attention_fusion import CrossAttentionFusion
+from .pretrained_backbone import build_visual_backbone
 
 
 class MultimodalDeepfakeDetector(nn.Module):
@@ -36,10 +37,23 @@ class MultimodalDeepfakeDetector(nn.Module):
         use_physio: bool = False,
         physio_embed_dim: int = 128,
         physio_fps: float = 4.0,
+        backbone: str = "temporal_vit",      # "temporal_vit" | "resnet50"
+        backbone_freeze: bool = True,        # only applies to pretrained backbones
     ):
         super().__init__()
-        self.visual = TemporalViT(image_size, patch_size, embed_dim, spatial_depth,
-                                  temporal_depth, num_heads, mlp_ratio, dropout, max_frames)
+        self.visual = build_visual_backbone(
+            kind=backbone,
+            image_size=image_size,
+            embed_dim=embed_dim,
+            temporal_depth=temporal_depth,
+            num_heads=num_heads,
+            mlp_ratio=mlp_ratio,
+            dropout=dropout,
+            max_frames=max_frames,
+            patch_size=patch_size,
+            spatial_depth=spatial_depth,
+            freeze=backbone_freeze,
+        )
         audio_kwargs = {}
         if audio_encoder == "wav2vec":
             audio_kwargs = dict(pretrained=wav2vec_pretrained, freeze=wav2vec_freeze)

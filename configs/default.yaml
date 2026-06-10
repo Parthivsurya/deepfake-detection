@@ -14,6 +14,10 @@ data:
   batch_size: 8
 
 model:
+  # Visual backbone: "resnet50" (ImageNet-pretrained, recommended for small data)
+  # or "temporal_vit" (trained from scratch — needs much more data).
+  backbone: resnet50
+  backbone_freeze: true
   patch_size: 16
   embed_dim: 384
   spatial_depth: 6
