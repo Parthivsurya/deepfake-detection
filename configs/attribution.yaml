@@ -1,0 +1,38 @@
+seed: 42
+
+data:
+  manifest_train: manifests/attribution_train.csv
+  manifest_val:   manifests/attribution_val.csv
+  manifest_test:  manifests/attribution_test.csv
+  frame_root: frames/
+  num_frames: 16
+  frame_size: 224
+  num_workers: 4
+  batch_size: 8
+
+model:
+  # Must match the detector you trained, since we reuse its TemporalViT weights.
+  patch_size: 16
+  embed_dim: 384
+  spatial_depth: 6
+  temporal_depth: 4
+  num_heads: 6
+  mlp_ratio: 4.0
+  dropout: 0.1
+  spectral_dim: 256
+  residual_dim: 256
+  head_hidden: 384
+  # Path to a detector checkpoint produced by scripts/train.py
+  detector_ckpt: checkpoints/best.pt
+
+train:
+  epochs: 25
+  lr: 2.0e-4
+  weight_decay: 0.05
+  warmup_epochs: 2
+  grad_clip: 1.0
+  amp: true
+  balanced: true            # WeightedRandomSampler over generator classes
+  label_smoothing: 0.05
+  log_dir: runs/attribution/
+  ckpt_dir: checkpoints/
