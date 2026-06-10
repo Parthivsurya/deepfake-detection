@@ -35,11 +35,31 @@ def main() -> None:
     p.add_argument("--audio_sr", type=int, default=16000)
     p.add_argument("--out_manifest", default=None,
                    help="defaults to <manifest>.extracted.csv")
+    p.add_argument("--device", default=None,
+                   help="device for face detection (cpu, cuda, mps). Defaults to auto-detect.")
     args = p.parse_args()
+
+    import torch
+    device = args.device
+    if device is None:
+        if torch.cuda.is_available():
+            device = "cuda"
+        elif torch.backends.mps.is_available():
+            device = "mps"
+        else:
+            device = "cpu"
+    print(f"Using device: {device} for face crop extraction.")
 
     df = pd.read_csv(args.manifest)
     out_frames = Path(args.out_frames); out_frames.mkdir(parents=True, exist_ok=True)
     out_audio = Path(args.out_audio); out_audio.mkdir(parents=True, exist_ok=True)
+
+    # Build MTCNN once and reuse across all clips (avoid per-clip model reload).
+    detector = None
+    if not args.no_face:
+        from facenet_pytorch import MTCNN
+        detector = MTCNN(keep_all=False, device=device, post_process=False)
+        print(f"MTCNN initialized on {device} (reused across all clips)")
 
     frames_dirs, audio_paths = [], []
     for _, row in tqdm(df.iterrows(), total=len(df), desc="extract"):
@@ -53,7 +73,8 @@ def main() -> None:
                                max_frames=args.max_frames, image_size=args.crop_size)
             else:
                 extract_face_crops(row["video_path"], f_dir, sample_fps=args.fps,
-                                   max_frames=args.max_frames, crop_size=args.crop_size)
+                                   max_frames=args.max_frames, crop_size=args.crop_size,
+                                   device=device, detector=detector)
             extract_audio(row["video_path"], a_path, sample_rate=args.audio_sr)
         except Exception as e:
             print(f"  ! {clip}: {e}")
