@@ -1,10 +1,14 @@
 """Train the source attribution head on top of a frozen detector backbone.
 
 Pipeline:
-    1. Load detector checkpoint -> freeze TemporalViT.
+    1. Load detector checkpoint -> freeze TemporalViT (+ AudioEncoder, +Physio).
     2. Train SpectralCNN + ResidualCNN + AttributionHead on generator_id labels.
     3. Save best checkpoint by macro-F1 on val.
     4. Fit Mahalanobis OOD scorer on val embeddings and save alongside the model.
+
+Supports:
+    * `--resume <ckpt>` — continue from a previous attribution_best.pt.
+    * DataParallel across all visible CUDA devices when count > 1.
 
 Usage:
     python scripts/train_attribution.py --config configs/attribution.yaml
@@ -17,6 +21,7 @@ from pathlib import Path
 
 import numpy as np
 import torch
+import torch.nn as nn
 import torch.nn.functional as F
 import yaml
 from sklearn.metrics import accuracy_score, f1_score
@@ -32,9 +37,12 @@ from attribution.open_set import MahalanobisScorer                       # noqa:
 from data.datasets.base import VideoManifest                             # noqa: E402
 
 
+def _unwrap(model: nn.Module) -> nn.Module:
+    return model.module if isinstance(model, nn.DataParallel) else model
+
+
 # ----------------------------------------------------------- data
 def class_balanced_sampler(df) -> WeightedRandomSampler:
-    """Reweight by inverse class frequency so rare generators aren't drowned."""
     y = df["generator_id"].values.astype(int)
     counts = np.bincount(y, minlength=num_known_classes())
     w = 1.0 / np.maximum(counts[y], 1)
@@ -107,9 +115,10 @@ def cosine_lr(step: int, total: int, warmup: int, base_lr: float) -> float:
 
 # ----------------------------------------------------------- eval
 def _batch_to_device(model, batch, device):
+    inner = _unwrap(model)
     frames = batch["frames"].to(device, non_blocking=True)
-    audio = batch["audio"].to(device, non_blocking=True) if model.use_audio else None
-    has_audio = batch["has_audio"].to(device, non_blocking=True) if model.use_audio else None
+    audio = batch["audio"].to(device, non_blocking=True) if inner.use_audio else None
+    has_audio = batch["has_audio"].to(device, non_blocking=True) if inner.use_audio else None
     return frames, audio, has_audio
 
 
@@ -144,6 +153,9 @@ def main() -> None:
     default_device = "cuda" if torch.cuda.is_available() else (
         "mps" if torch.backends.mps.is_available() else "cpu")
     p.add_argument("--device", default=default_device)
+    p.add_argument("--resume", type=str, default=None,
+                   help="path to a previous attribution_best.pt; restores model, "
+                        "optimizer, scaler, step counter, and best_f1.")
     args = p.parse_args()
 
     cfg = yaml.safe_load(open(args.config))
@@ -152,10 +164,16 @@ def main() -> None:
     train_loader, val_loader = build_loaders(cfg)
     model = build_model(cfg).to(args.device)
 
-    # Load and freeze detector backbone.
+    # Load and freeze detector backbone BEFORE DataParallel wrapping
+    # (load_backbone reads .visual, .audio, .physio attrs).
     backbone_ckpt = cfg["model"]["detector_ckpt"]
     print(f"loading detector backbone: {backbone_ckpt}")
     model.load_backbone(backbone_ckpt, strict=False)
+
+    use_dp = args.device == "cuda" and torch.cuda.device_count() > 1
+    if use_dp:
+        print(f"DataParallel across {torch.cuda.device_count()} CUDA devices")
+        model = nn.DataParallel(model)
 
     trainable = [p for p in model.parameters() if p.requires_grad]
     print(f"trainable params: {sum(p.numel() for p in trainable):,}")
@@ -166,15 +184,38 @@ def main() -> None:
     supcon = SupConLoss(temperature=float(cfg["train"].get("supcon_temperature", 0.1)))
     if supcon_w > 0:
         print(f"contrastive provenance loss enabled (weight={supcon_w}, T={supcon.temperature})")
-    scaler = torch.cuda.amp.GradScaler(
-        enabled=cfg["train"]["amp"] and args.device == "cuda")
+    amp_enabled = cfg["train"]["amp"] and args.device == "cuda"
+    scaler = torch.amp.GradScaler("cuda", enabled=amp_enabled)
     total_steps = cfg["train"]["epochs"] * max(len(train_loader), 1)
     warmup = cfg["train"]["warmup_epochs"] * max(len(train_loader), 1)
 
     ckpt_dir = Path(cfg["train"]["ckpt_dir"]); ckpt_dir.mkdir(parents=True, exist_ok=True)
     best_f1 = -1.0
     step = 0
-    for epoch in range(cfg["train"]["epochs"]):
+    start_epoch = 0
+
+    # ---------------- resume ----------------
+    if args.resume:
+        ckpt_path = Path(args.resume)
+        if not ckpt_path.exists():
+            raise FileNotFoundError(f"--resume {ckpt_path} does not exist")
+        print(f"resuming from {ckpt_path}")
+        ckpt = torch.load(ckpt_path, map_location=args.device)
+        _unwrap(model).load_state_dict(ckpt["model"], strict=False)
+        if "optimizer" in ckpt:
+            opt.load_state_dict(ckpt["optimizer"])
+        if "scaler" in ckpt and amp_enabled:
+            try:
+                scaler.load_state_dict(ckpt["scaler"])
+            except Exception as e:
+                print(f"WARN: scaler state mismatch ({e}); starting scaler fresh")
+        step = int(ckpt.get("step", 0))
+        start_epoch = int(ckpt.get("epoch", 0)) + 1
+        best_f1 = float(ckpt.get("metrics", {}).get("f1_macro", best_f1))
+        print(f"  resumed at epoch {start_epoch}, step {step}, best_f1 {best_f1:.4f}")
+
+    # ---------------- train ----------------
+    for epoch in range(start_epoch, cfg["train"]["epochs"]):
         model.train()
         for batch in train_loader:
             frames, audio, has_audio = _batch_to_device(model, batch, args.device)
@@ -183,9 +224,10 @@ def main() -> None:
             for g in opt.param_groups:
                 g["lr"] = lr
             opt.zero_grad(set_to_none=True)
-            with torch.cuda.amp.autocast(enabled=scaler.is_enabled()):
+            with torch.amp.autocast("cuda", enabled=amp_enabled):
                 out = model(frames, waveform=audio, has_audio=has_audio)
-                ce = F.cross_entropy(out["logits"], y, label_smoothing=cfg["train"].get("label_smoothing", 0.0))
+                ce = F.cross_entropy(out["logits"], y,
+                                     label_smoothing=cfg["train"].get("label_smoothing", 0.0))
                 if supcon_w > 0:
                     cpl = supcon(out["embed"], y)
                     loss = ce + supcon_w * cpl
@@ -212,9 +254,12 @@ def main() -> None:
             best_f1 = f1
             scorer = MahalanobisScorer().fit(embeds, labels)
             torch.save({
-                "model": model.state_dict(),
+                "model": _unwrap(model).state_dict(),
+                "optimizer": opt.state_dict(),
+                "scaler": scaler.state_dict() if amp_enabled else None,
                 "cfg": cfg,
                 "epoch": epoch,
+                "step": step,
                 "metrics": metrics,
                 "mahalanobis": {
                     "means": scorer.means,

@@ -2,6 +2,12 @@
 
 Loads YAML config, builds dataloaders + model, trains with AMP, evaluates on
 the val split, and writes checkpoints. Metrics: accuracy, F1, AUC (Task 6).
+
+Supports:
+  * `--resume <ckpt>` — continue training from a previous best.pt with
+    optimizer + scaler + step counter restored.
+  * DataParallel across all visible CUDA devices when count > 1
+    (useful on Kaggle's T4 x2).
 """
 from __future__ import annotations
 import argparse
@@ -14,6 +20,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import numpy as np  # noqa: E402
 import torch  # noqa: E402
+import torch.nn as nn  # noqa: E402
 import torch.nn.functional as F  # noqa: E402
 from torch.utils.data import DataLoader  # noqa: E402
 from sklearn.metrics import roc_auc_score, f1_score, accuracy_score  # noqa: E402
@@ -74,6 +81,11 @@ def cosine_lr(step: int, total: int, warmup: int, base_lr: float) -> float:
     return 0.5 * base_lr * (1 + math.cos(math.pi * p))
 
 
+def _unwrap(model: nn.Module) -> nn.Module:
+    """Return the underlying module if wrapped in DataParallel."""
+    return model.module if isinstance(model, nn.DataParallel) else model
+
+
 def step_batch(model, batch, device, sync_weight: float):
     frames = batch["frames"].to(device, non_blocking=True)
     audio = batch["audio"].to(device, non_blocking=True)
@@ -81,8 +93,12 @@ def step_batch(model, batch, device, sync_weight: float):
     labels = batch["label"].to(device, non_blocking=True)
     out = model(frames, audio, has_audio=has_audio)
     ce = F.cross_entropy(out["logits"], labels)
-    loss = ce + sync_weight * out["sync_loss"]
-    return loss, ce, out["sync_loss"], out["logits"], labels
+    # DataParallel returns per-replica losses; reduce by mean so backward sees a scalar.
+    sync_loss = out["sync_loss"]
+    if sync_loss.dim() > 0:
+        sync_loss = sync_loss.mean()
+    loss = ce + sync_weight * sync_loss
+    return loss, ce, sync_loss, out["logits"], labels
 
 
 @torch.no_grad()
@@ -108,8 +124,12 @@ def evaluate(model, loader, device) -> dict:
 def main() -> None:
     p = argparse.ArgumentParser()
     p.add_argument("--config", required=True)
-    default_device = "cuda" if torch.cuda.is_available() else ("mps" if torch.backends.mps.is_available() else "cpu")
+    default_device = "cuda" if torch.cuda.is_available() else (
+        "mps" if torch.backends.mps.is_available() else "cpu")
     p.add_argument("--device", default=default_device)
+    p.add_argument("--resume", type=str, default=None,
+                   help="path to a previous checkpoint; restores model, optimizer, "
+                        "scaler, step counter, and best_auc.")
     args = p.parse_args()
 
     cfg = yaml.safe_load(open(args.config))
@@ -118,9 +138,16 @@ def main() -> None:
     train_loader, val_loader = build_loaders(cfg)
     model = build_model(cfg).to(args.device)
 
+    # Multi-GPU on CUDA when device_count > 1 (e.g., Kaggle T4 x2).
+    use_dp = args.device == "cuda" and torch.cuda.device_count() > 1
+    if use_dp:
+        print(f"DataParallel across {torch.cuda.device_count()} CUDA devices")
+        model = nn.DataParallel(model)
+
     opt = torch.optim.AdamW(model.parameters(), lr=cfg["train"]["lr"],
                             weight_decay=cfg["train"]["weight_decay"])
-    scaler = torch.cuda.amp.GradScaler(enabled=cfg["train"]["amp"] and args.device == "cuda")
+    amp_enabled = cfg["train"]["amp"] and args.device == "cuda"
+    scaler = torch.amp.GradScaler("cuda", enabled=amp_enabled)
     total_steps = cfg["train"]["epochs"] * max(len(train_loader), 1)
     warmup = cfg["train"]["warmup_epochs"] * max(len(train_loader), 1)
     sync_w = cfg["train"]["sync_loss_weight"]
@@ -128,14 +155,38 @@ def main() -> None:
     ckpt_dir = Path(cfg["train"]["ckpt_dir"]); ckpt_dir.mkdir(parents=True, exist_ok=True)
     best_auc = -1.0
     step = 0
-    for epoch in range(cfg["train"]["epochs"]):
+    start_epoch = 0
+
+    # ---------------- resume ----------------
+    if args.resume:
+        ckpt_path = Path(args.resume)
+        if not ckpt_path.exists():
+            raise FileNotFoundError(f"--resume {ckpt_path} does not exist")
+        print(f"resuming from {ckpt_path}")
+        ckpt = torch.load(ckpt_path, map_location=args.device)
+        _unwrap(model).load_state_dict(ckpt["model"])
+        if "optimizer" in ckpt:
+            opt.load_state_dict(ckpt["optimizer"])
+        if "scaler" in ckpt and amp_enabled:
+            try:
+                scaler.load_state_dict(ckpt["scaler"])
+            except Exception as e:
+                print(f"WARN: scaler state mismatch ({e}); starting scaler fresh")
+        step = int(ckpt.get("step", 0))
+        start_epoch = int(ckpt.get("epoch", 0)) + 1
+        best_auc = float(ckpt.get("metrics", {}).get(
+            "auc", ckpt.get("metrics", {}).get("acc", best_auc)))
+        print(f"  resumed at epoch {start_epoch}, step {step}, best_auc {best_auc:.4f}")
+
+    # ---------------- train ----------------
+    for epoch in range(start_epoch, cfg["train"]["epochs"]):
         model.train()
         for batch in train_loader:
             lr = cosine_lr(step, total_steps, warmup, cfg["train"]["lr"])
             for g in opt.param_groups:
                 g["lr"] = lr
             opt.zero_grad(set_to_none=True)
-            with torch.cuda.amp.autocast(enabled=scaler.is_enabled()):
+            with torch.amp.autocast("cuda", enabled=amp_enabled):
                 loss, ce, sl, _, _ = step_batch(model, batch, args.device, sync_w)
             scaler.scale(loss).backward()
             scaler.unscale_(opt)
@@ -151,8 +202,15 @@ def main() -> None:
         auc = metrics.get("auc", metrics.get("acc", 0.0))
         if auc > best_auc:
             best_auc = auc
-            torch.save({"model": model.state_dict(), "epoch": epoch, "metrics": metrics,
-                        "cfg": cfg}, ckpt_dir / "best.pt")
+            torch.save({
+                "model": _unwrap(model).state_dict(),
+                "optimizer": opt.state_dict(),
+                "scaler": scaler.state_dict() if amp_enabled else None,
+                "epoch": epoch,
+                "step": step,
+                "metrics": metrics,
+                "cfg": cfg,
+            }, ckpt_dir / "best.pt")
             print(f"  saved -> {ckpt_dir/'best.pt'} (auc/acc={auc:.4f})")
 
 
