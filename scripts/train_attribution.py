@@ -43,7 +43,13 @@ def class_balanced_sampler(df) -> WeightedRandomSampler:
 def build_loaders(cfg: dict):
     train_m = VideoManifest.load(cfg["data"]["manifest_train"])
     val_m = VideoManifest.load(cfg["data"]["manifest_val"])
-    common = dict(num_frames=cfg["data"]["num_frames"], frame_size=cfg["data"]["frame_size"])
+    common = dict(
+        num_frames=cfg["data"]["num_frames"],
+        frame_size=cfg["data"]["frame_size"],
+        audio_sample_rate=cfg["data"].get("audio_sample_rate", 16000),
+        audio_seconds=cfg["data"].get("audio_seconds", 4.0),
+        load_audio=cfg["model"].get("use_audio", True),
+    )
     train_ds = AttributionDataset(train_m, training=True, **common)
     val_ds = AttributionDataset(val_m, training=False, **common)
 
@@ -77,6 +83,11 @@ def build_model(cfg: dict) -> SourceAttributionModel:
         residual_dim=m.get("residual_dim", 256),
         head_hidden=m.get("head_hidden", 384),
         num_classes=num_known_classes(),
+        use_audio=m.get("use_audio", True),
+        audio_sample_rate=cfg["data"].get("audio_sample_rate", 16000),
+        audio_embed_dim=m.get("audio_embed_dim", 256),
+        audio_fp_dim=m.get("audio_fp_dim", 256),
+        audio_n_mels=m.get("audio_n_mels", 80),
     )
 
 
@@ -88,14 +99,21 @@ def cosine_lr(step: int, total: int, warmup: int, base_lr: float) -> float:
 
 
 # ----------------------------------------------------------- eval
+def _batch_to_device(model, batch, device):
+    frames = batch["frames"].to(device, non_blocking=True)
+    audio = batch["audio"].to(device, non_blocking=True) if model.use_audio else None
+    has_audio = batch["has_audio"].to(device, non_blocking=True) if model.use_audio else None
+    return frames, audio, has_audio
+
+
 @torch.no_grad()
 def evaluate(model, loader, device) -> tuple[dict, torch.Tensor, torch.Tensor]:
     model.eval()
     preds, labels, embeds = [], [], []
     for batch in loader:
-        frames = batch["frames"].to(device, non_blocking=True)
+        frames, audio, has_audio = _batch_to_device(model, batch, device)
         y = batch["generator_id"]
-        out = model(frames)
+        out = model(frames, waveform=audio, has_audio=has_audio)
         preds.append(out["logits"].argmax(dim=-1).cpu().numpy())
         labels.append(y.numpy())
         embeds.append(out["embed"].cpu())
@@ -148,14 +166,14 @@ def main() -> None:
     for epoch in range(cfg["train"]["epochs"]):
         model.train()
         for batch in train_loader:
-            frames = batch["frames"].to(args.device, non_blocking=True)
+            frames, audio, has_audio = _batch_to_device(model, batch, args.device)
             y = batch["generator_id"].to(args.device, non_blocking=True)
             lr = cosine_lr(step, total_steps, warmup, cfg["train"]["lr"])
             for g in opt.param_groups:
                 g["lr"] = lr
             opt.zero_grad(set_to_none=True)
             with torch.cuda.amp.autocast(enabled=scaler.is_enabled()):
-                out = model(frames)
+                out = model(frames, waveform=audio, has_audio=has_audio)
                 loss = F.cross_entropy(out["logits"], y, label_smoothing=cfg["train"].get("label_smoothing", 0.0))
             scaler.scale(loss).backward()
             scaler.unscale_(opt)

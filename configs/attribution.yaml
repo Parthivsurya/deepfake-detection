@@ -5,13 +5,17 @@ data:
   manifest_val:   manifests/attribution_val.csv
   manifest_test:  manifests/attribution_test.csv
   frame_root: frames/
+  audio_root: audio/
   num_frames: 16
   frame_size: 224
+  audio_sample_rate: 16000
+  audio_seconds: 4.0
   num_workers: 4
   batch_size: 8
 
 model:
-  # Must match the detector you trained, since we reuse its TemporalViT weights.
+  # Must match the detector you trained, since we reuse its TemporalViT
+  # AND AudioEncoder weights.
   patch_size: 16
   embed_dim: 384
   spatial_depth: 6
@@ -22,6 +26,11 @@ model:
   spectral_dim: 256
   residual_dim: 256
   head_hidden: 384
+  # Audio branches: frozen AudioEncoder + trainable mel-residual fingerprint CNN.
+  use_audio: true
+  audio_embed_dim: 256
+  audio_fp_dim: 256
+  audio_n_mels: 80
   # Path to a detector checkpoint produced by scripts/train.py
   detector_ckpt: checkpoints/best.pt
 

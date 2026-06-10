@@ -49,3 +49,38 @@ class SpectralCNN(_FingerprintCNN):
 
 class ResidualCNN(_FingerprintCNN):
     pass
+
+
+# ------------------------------------------------------------------ audio
+def _conv1d_bn(c_in: int, c_out: int, k: int = 3, s: int = 1) -> nn.Sequential:
+    return nn.Sequential(
+        nn.Conv1d(c_in, c_out, k, stride=s, padding=k // 2, bias=False),
+        nn.BatchNorm1d(c_out),
+        nn.GELU(),
+    )
+
+
+class AudioFingerprintCNN(nn.Module):
+    """1D CNN over the mel-residual spectrogram -> clip embedding.
+
+    Input:  (B, n_mels, T_a) mel residual
+    Output: (B, embed_dim)
+    """
+
+    def __init__(self, n_mels: int = 80, embed_dim: int = 256):
+        super().__init__()
+        self.net = nn.Sequential(
+            _conv1d_bn(n_mels, 64, k=5, s=2),
+            _conv1d_bn(64, 128, k=5, s=2),
+            _conv1d_bn(128, 192, k=3, s=2),
+            _conv1d_bn(192, 256, k=3, s=2),
+        )
+        self.head = nn.Sequential(
+            nn.AdaptiveAvgPool1d(1),
+            nn.Flatten(),
+            nn.Linear(256, embed_dim),
+        )
+        self.embed_dim = embed_dim
+
+    def forward(self, mel: torch.Tensor) -> torch.Tensor:
+        return self.head(self.net(mel))

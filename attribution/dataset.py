@@ -1,16 +1,12 @@
 """Dataset adapter for attribution training.
 
 Reads a manifest with `generator_id` column (built by
-`scripts/build_attribution_manifest.py`) and yields {frames, generator_id, ...}.
-
-Only the visual stream is used — generator fingerprints live in the pixels and
-their high-frequency content, not in waveform features. Audio is kept around
-in the row for downstream consumers but not loaded here.
+`scripts/build_attribution_manifest.py`) and yields {frames, audio, generator_id, ...}.
 """
 from __future__ import annotations
 import math
 from pathlib import Path
-from typing import List
+from typing import List, Tuple
 
 import numpy as np
 import torch
@@ -26,6 +22,9 @@ class AttributionDataset(Dataset):
         manifest: VideoManifest,
         num_frames: int = 16,
         frame_size: int = 224,
+        audio_sample_rate: int = 16000,
+        audio_seconds: float = 4.0,
+        load_audio: bool = True,
         training: bool = False,
     ):
         if "generator_id" not in manifest.df.columns:
@@ -36,6 +35,9 @@ class AttributionDataset(Dataset):
         self.df = manifest.df.reset_index(drop=True)
         self.num_frames = num_frames
         self.frame_size = frame_size
+        self.sr = audio_sample_rate
+        self.audio_seconds = audio_seconds
+        self.load_audio = load_audio
         self.training = training
 
     def __len__(self) -> int:
@@ -44,13 +46,19 @@ class AttributionDataset(Dataset):
     def __getitem__(self, idx: int) -> dict:
         row = self.df.iloc[idx]
         frames = self._load_frames(row.get("frames_dir"))
-        return {
+        item = {
             "frames": torch.from_numpy(frames),
             "generator_id": torch.tensor(int(row["generator_id"]), dtype=torch.long),
             "label": torch.tensor(int(row["label"]), dtype=torch.long),
             "clip_id": str(row["clip_id"]),
         }
+        if self.load_audio:
+            wave, has_a = self._load_audio_clip(row.get("audio_path"))
+            item["audio"] = torch.from_numpy(wave)
+            item["has_audio"] = torch.tensor(has_a, dtype=torch.float32)
+        return item
 
+    # ---------- frames ----------
     def _load_frames(self, frames_dir) -> np.ndarray:
         if not frames_dir or not Path(str(frames_dir)).exists():
             return np.zeros((self.num_frames, 3, self.frame_size, self.frame_size), dtype=np.float32)
@@ -76,3 +84,14 @@ class AttributionDataset(Dataset):
             step = n_available / T
             return [int(math.floor(i * step)) for i in range(T)]
         return list(range(n_available)) + [n_available - 1] * (T - n_available)
+
+    # ---------- audio ----------
+    def _load_audio_clip(self, audio_path) -> Tuple[np.ndarray, int]:
+        target = int(self.sr * self.audio_seconds)
+        if not audio_path or not Path(str(audio_path)).exists():
+            return np.zeros(target, dtype=np.float32), 0
+        try:
+            from data.preprocessing.audio_extraction import load_audio_clip
+            return load_audio_clip(audio_path, self.sr, self.audio_seconds), 1
+        except Exception:
+            return np.zeros(target, dtype=np.float32), 0

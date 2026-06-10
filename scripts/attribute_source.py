@@ -32,6 +32,17 @@ from attribution.open_set import EnergyScorer, MahalanobisScorer         # noqa:
 from data.datasets.base import _IMG_MEAN, _IMG_STD                       # noqa: E402
 
 
+def load_audio_from_path(path: Path, sr: int, seconds: float) -> tuple[torch.Tensor, int]:
+    """Best-effort audio loader: returns (waveform (1, S), has_audio 0/1)."""
+    target = int(sr * seconds)
+    try:
+        from data.preprocessing.audio_extraction import load_audio_clip
+        wav = load_audio_clip(str(path), sr, seconds)
+        return torch.from_numpy(wav).unsqueeze(0), 1
+    except Exception:
+        return torch.zeros(1, target), 0
+
+
 # ----------------------------------------------------------- I/O
 def load_frames_from_dir(d: Path, num_frames: int, frame_size: int) -> torch.Tensor:
     paths = sorted(d.glob("frame_*.jpg"))
@@ -81,11 +92,16 @@ def main() -> None:
     p.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     p.add_argument("--num-frames", type=int, default=16)
     p.add_argument("--frame-size", type=int, default=224)
+    p.add_argument("--audio", type=str, default=None,
+                   help="optional waveform path; if omitted and --video given, audio "
+                        "is loaded from the video file")
+    p.add_argument("--audio-seconds", type=float, default=4.0)
     p.add_argument("--json", action="store_true", help="output a single JSON line")
     args = p.parse_args()
 
     ckpt = torch.load(args.ckpt, map_location="cpu")
     cfg = ckpt["cfg"]
+    use_audio = cfg["model"].get("use_audio", True)
     model = SourceAttributionModel(
         image_size=cfg["data"]["frame_size"],
         patch_size=cfg["model"]["patch_size"],
@@ -99,6 +115,11 @@ def main() -> None:
         spectral_dim=cfg["model"].get("spectral_dim", 256),
         residual_dim=cfg["model"].get("residual_dim", 256),
         head_hidden=cfg["model"].get("head_hidden", 384),
+        use_audio=use_audio,
+        audio_sample_rate=cfg["data"].get("audio_sample_rate", 16000),
+        audio_embed_dim=cfg["model"].get("audio_embed_dim", 256),
+        audio_fp_dim=cfg["model"].get("audio_fp_dim", 256),
+        audio_n_mels=cfg["model"].get("audio_n_mels", 80),
     )
     model.load_state_dict(ckpt["model"], strict=False)
     model.eval().to(args.device)
@@ -109,8 +130,22 @@ def main() -> None:
         frames = load_frames_from_dir(Path(args.frames_dir), args.num_frames, args.frame_size)
     frames = frames.to(args.device)
 
+    audio = None
+    has_audio = None
+    if use_audio:
+        sr = cfg["data"].get("audio_sample_rate", 16000)
+        src = args.audio or args.video
+        if src is None:
+            audio = torch.zeros(1, int(sr * args.audio_seconds))
+            has_audio = torch.zeros(1)
+        else:
+            audio, ha = load_audio_from_path(Path(src), sr, args.audio_seconds)
+            has_audio = torch.tensor([ha], dtype=torch.float32)
+        audio = audio.to(args.device)
+        has_audio = has_audio.to(args.device)
+
     with torch.no_grad():
-        out = model(frames)
+        out = model(frames, waveform=audio, has_audio=has_audio)
 
     probs = F.softmax(out["logits"], dim=-1).squeeze(0).cpu()
     energy = EnergyScorer.score(out["logits"]).item()

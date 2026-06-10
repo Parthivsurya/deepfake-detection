@@ -1,19 +1,29 @@
-"""Forensic fingerprint feature extractors.
+"""Forensic fingerprint feature extractors (video + audio).
 
-Two complementary signals:
+Video signals:
   1. `dct_highpass`     — block-DCT high-frequency magnitude map; captures
                           upsampling-checkerboard artifacts of GAN architectures
                           and the over-smoothness of diffusion sampling.
   2. `denoise_residual` — `x - blur(x)`; a cheap proxy for the PRNU-style
                           generator-noise pattern (Marra et al. 2019).
 
-Both extractors are *parameter-free* tensor ops so they run on GPU inside the
-training loop and do not need pre-computation.
+Audio signals:
+  3. `mel_residual`     — log-mel spectrogram minus a time-smoothed version.
+                          TTS / neural-vocoder outputs leave characteristic
+                          high-frequency mel artifacts that survive this filter.
+
+All extractors are tensor ops so they run on GPU inside the training loop and
+do not need pre-computation.
 """
 from __future__ import annotations
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+
+try:
+    import torchaudio  # only required for the audio fingerprint
+except ImportError:  # pragma: no cover
+    torchaudio = None
 
 
 # ------------------------------------------------------------------ DCT
@@ -102,3 +112,54 @@ class FingerprintExtractor(nn.Module):
             "spectral": spec.reshape(B, T, C, H, W),
             "residual": resid.reshape(B, T, C, H, W),
         }
+
+
+# ------------------------------------------------------------------ audio
+def mel_residual(
+    log_mel: torch.Tensor, smooth_window: int = 5
+) -> torch.Tensor:
+    """log-mel - moving-average(log-mel) along the time axis.
+
+    Input  : (B, n_mels, T_a)
+    Output : (B, n_mels, T_a) — high-frequency residual that captures vocoder
+             and TTS artifacts (over-smooth pitch, comb-filter spectra, etc.).
+    """
+    pad = smooth_window // 2
+    smoothed = F.avg_pool1d(log_mel, kernel_size=smooth_window, stride=1, padding=pad)
+    if smoothed.size(-1) != log_mel.size(-1):
+        smoothed = smoothed[..., : log_mel.size(-1)]
+    return log_mel - smoothed
+
+
+class AudioFingerprintExtractor(nn.Module):
+    """Stateless module that returns the mel-residual fingerprint of a waveform.
+
+    Input  : waveform (B, samples), `has_audio` mask (B,) optional
+    Output : (B, n_mels, T_a) mel-residual tensor
+    """
+
+    def __init__(
+        self,
+        sample_rate: int = 16000,
+        n_mels: int = 80,
+        n_fft: int = 400,
+        hop_length: int = 160,
+        smooth_window: int = 5,
+    ):
+        super().__init__()
+        if torchaudio is None:
+            raise RuntimeError("torchaudio required for AudioFingerprintExtractor")
+        self.mel = torchaudio.transforms.MelSpectrogram(
+            sample_rate=sample_rate,
+            n_fft=n_fft,
+            hop_length=hop_length,
+            n_mels=n_mels,
+            power=2.0,
+        )
+        self.log = torchaudio.transforms.AmplitudeToDB(stype="power")
+        self.smooth_window = smooth_window
+        self.n_mels = n_mels
+
+    def forward(self, waveform: torch.Tensor) -> torch.Tensor:
+        mel = self.log(self.mel(waveform))             # (B, n_mels, T_a)
+        return mel_residual(mel, smooth_window=self.smooth_window)

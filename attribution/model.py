@@ -1,13 +1,14 @@
 """End-to-end source attribution model.
 
-Wires together:
-  * FingerprintExtractor  (parameter-free DCT + residual)
-  * SpectralCNN, ResidualCNN
-  * Frozen TemporalViT from the existing detector (semantic branch)
-  * AttributionHead
+Five branches:
+  * Semantic video  — frozen TemporalViT  (reused from detector checkpoint)
+  * Spectral video  — DCT high-pass -> SpectralCNN
+  * Residual video  — denoise residual -> ResidualCNN
+  * Semantic audio  — frozen AudioEncoder (reused from detector checkpoint)
+  * Audio fingerprint — mel-residual -> AudioFingerprintCNN
 
-The TemporalViT is loaded from a detector checkpoint and run in eval mode with
-gradients disabled — we only train the fingerprint branches + head.
+Audio branches are gated by `has_audio` (B,) so videos without a soundtrack
+contribute a zero audio embedding and don't poison the head.
 """
 from __future__ import annotations
 from pathlib import Path
@@ -16,12 +17,13 @@ from typing import Optional
 import torch
 import torch.nn as nn
 
+from models.audio_encoder import AudioEncoder
 from models.temporal_vit import TemporalViT
 
 from .attribution_head import AttributionHead
-from .fingerprint import FingerprintExtractor
+from .fingerprint import AudioFingerprintExtractor, FingerprintExtractor
 from .generators import num_known_classes
-from .spectral_cnn import ResidualCNN, SpectralCNN
+from .spectral_cnn import AudioFingerprintCNN, ResidualCNN, SpectralCNN
 
 
 class SourceAttributionModel(nn.Module):
@@ -40,11 +42,18 @@ class SourceAttributionModel(nn.Module):
         residual_dim: int = 256,
         head_hidden: int = 384,
         num_classes: Optional[int] = None,
+        # ----- audio -----
+        use_audio: bool = True,
+        audio_sample_rate: int = 16000,
+        audio_embed_dim: int = 256,
+        audio_fp_dim: int = 256,
+        audio_n_mels: int = 80,
     ):
         super().__init__()
         if num_classes is None:
             num_classes = num_known_classes()
 
+        # Video branches
         self.backbone = TemporalViT(
             image_size, patch_size, embed_dim, spatial_depth,
             temporal_depth, num_heads, mlp_ratio, dropout, max_frames,
@@ -52,39 +61,59 @@ class SourceAttributionModel(nn.Module):
         self.fingerprint = FingerprintExtractor()
         self.spectral_cnn = SpectralCNN(in_channels=3, embed_dim=spectral_dim)
         self.residual_cnn = ResidualCNN(in_channels=3, embed_dim=residual_dim)
+
+        # Audio branches
+        self.use_audio = use_audio
+        branch_dims = [embed_dim, spectral_dim, residual_dim]
+        if use_audio:
+            self.audio_encoder = AudioEncoder(
+                sample_rate=audio_sample_rate, embed_dim=audio_embed_dim, n_mels=audio_n_mels,
+            )
+            self.audio_fp = AudioFingerprintExtractor(
+                sample_rate=audio_sample_rate, n_mels=audio_n_mels,
+            )
+            self.audio_fp_cnn = AudioFingerprintCNN(n_mels=audio_n_mels, embed_dim=audio_fp_dim)
+            branch_dims += [audio_embed_dim, audio_fp_dim]
+            self.audio_embed_dim = audio_embed_dim
+            self.audio_fp_dim = audio_fp_dim
+
         self.head = AttributionHead(
-            semantic_dim=embed_dim,
-            spectral_dim=spectral_dim,
-            residual_dim=residual_dim,
+            branch_dims=branch_dims,
             hidden_dim=head_hidden,
             num_classes=num_classes,
             dropout=dropout,
         )
 
         self._backbone_frozen = False
+        self._audio_encoder_frozen = False
 
     # ------------------------------------------------------------------
     def load_backbone(self, ckpt_path: str | Path, strict: bool = False) -> None:
-        """Load TemporalViT weights from a detector checkpoint and freeze them.
+        """Load detector weights and freeze the semantic branches.
 
-        Detector checkpoint stores the full MultimodalDeepfakeDetector
-        state-dict under the "model" key with `visual.*` prefix on the ViT.
+        Detector ckpt stores the full MultimodalDeepfakeDetector state-dict
+        under "model"; visual.* -> TemporalViT, audio.* -> AudioEncoder.
         """
         ckpt = torch.load(ckpt_path, map_location="cpu")
         sd = ckpt.get("model", ckpt)
-        visual_sd = {
-            k[len("visual."):]: v
-            for k, v in sd.items() if k.startswith("visual.")
-        }
+
+        visual_sd = {k[len("visual."):]: v for k, v in sd.items() if k.startswith("visual.")}
         if not visual_sd:
             raise RuntimeError(
                 f"checkpoint {ckpt_path} has no `visual.*` keys "
                 "— expected a MultimodalDeepfakeDetector checkpoint"
             )
-        missing, unexpected = self.backbone.load_state_dict(visual_sd, strict=strict)
-        if strict and (missing or unexpected):
-            raise RuntimeError(f"backbone load mismatch: missing={missing} unexpected={unexpected}")
+        self.backbone.load_state_dict(visual_sd, strict=strict)
         self.freeze_backbone()
+
+        if self.use_audio:
+            audio_sd = {k[len("audio."):]: v for k, v in sd.items() if k.startswith("audio.")}
+            if audio_sd:
+                self.audio_encoder.load_state_dict(audio_sd, strict=strict)
+                self.freeze_audio_encoder()
+            else:
+                print("WARN: no `audio.*` keys in detector ckpt — audio encoder "
+                      "will be trained from scratch (or stays randomly initialized).")
 
     def freeze_backbone(self) -> None:
         for p in self.backbone.parameters():
@@ -92,16 +121,29 @@ class SourceAttributionModel(nn.Module):
         self.backbone.eval()
         self._backbone_frozen = True
 
-    def train(self, mode: bool = True):  # keep backbone in eval even when training
+    def freeze_audio_encoder(self) -> None:
+        for p in self.audio_encoder.parameters():
+            p.requires_grad = False
+        self.audio_encoder.eval()
+        self._audio_encoder_frozen = True
+
+    def train(self, mode: bool = True):
         super().train(mode)
         if self._backbone_frozen:
             self.backbone.eval()
+        if self.use_audio and self._audio_encoder_frozen:
+            self.audio_encoder.eval()
         return self
 
     # ------------------------------------------------------------------
-    def forward(self, frames: torch.Tensor) -> dict:
-        """frames: (B, T, 3, H, W) normalized RGB."""
-        # Semantic branch (frozen).
+    def forward(
+        self,
+        frames: torch.Tensor,
+        waveform: Optional[torch.Tensor] = None,
+        has_audio: Optional[torch.Tensor] = None,
+    ) -> dict:
+        """frames: (B, T, 3, H, W);  waveform: (B, samples);  has_audio: (B,)."""
+        # ----- video semantic (frozen) -----
         if self._backbone_frozen:
             with torch.no_grad():
                 _, v_tokens = self.backbone(frames)
@@ -109,16 +151,40 @@ class SourceAttributionModel(nn.Module):
             _, v_tokens = self.backbone(frames)
         semantic = v_tokens.mean(dim=1)                  # (B, embed_dim)
 
-        # Fingerprint branches.
+        # ----- video fingerprints -----
         fp = self.fingerprint(frames)
-        spectral = self.spectral_cnn(fp["spectral"])      # (B, spectral_dim)
-        residual = self.residual_cnn(fp["residual"])      # (B, residual_dim)
+        spectral = self.spectral_cnn(fp["spectral"])
+        residual = self.residual_cnn(fp["residual"])
 
-        out = self.head(semantic, spectral, residual)
-        return {
+        branches = [semantic, spectral, residual]
+
+        # ----- audio -----
+        if self.use_audio:
+            if waveform is None:
+                raise ValueError("model has use_audio=True but no waveform was passed")
+            if self._audio_encoder_frozen:
+                with torch.no_grad():
+                    a_clip, _ = self.audio_encoder(waveform)
+            else:
+                a_clip, _ = self.audio_encoder(waveform)
+            a_mel = self.audio_fp(waveform)
+            a_fp = self.audio_fp_cnn(a_mel)
+
+            if has_audio is not None:
+                mask = has_audio.to(a_clip.dtype).view(-1, 1)
+                a_clip = a_clip * mask
+                a_fp = a_fp * mask
+            branches += [a_clip, a_fp]
+
+        out = self.head(*branches)
+        result = {
             "logits": out["logits"],
             "embed": out["embed"],
             "semantic": semantic,
             "spectral": spectral,
             "residual": residual,
         }
+        if self.use_audio:
+            result["audio_semantic"] = a_clip
+            result["audio_fingerprint"] = a_fp
+        return result
