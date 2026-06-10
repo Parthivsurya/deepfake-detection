@@ -44,7 +44,10 @@ echo ""
 
 # ----- upload (kaggle CLI shows its own progress bar)
 echo "[4/4] uploading — go grab a coffee, this takes 20-60 min depending on uplink..."
-kaggle datasets create -p "$DATA_DIR"
+# --dir-mode zip: each top-level subfolder (Celeb-real, Celeb-synthesis) is
+# zipped and uploaded as a single file. Kaggle auto-extracts zips server-side,
+# so at attach time the folder structure is restored.
+kaggle datasets create -p "$DATA_DIR" --dir-mode zip
 
 echo ""
 echo "Done. Dataset will appear at:"
