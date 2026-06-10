@@ -1,14 +1,16 @@
 """End-to-end source attribution model.
 
-Five branches:
-  * Semantic video  — frozen TemporalViT  (reused from detector checkpoint)
-  * Spectral video  — DCT high-pass -> SpectralCNN
-  * Residual video  — denoise residual -> ResidualCNN
-  * Semantic audio  — frozen AudioEncoder (reused from detector checkpoint)
+Up to six branches:
+  * Semantic video    — frozen TemporalViT (from detector checkpoint)
+  * Spectral video    — DCT high-pass -> SpectralCNN
+  * Residual video    — denoise residual -> ResidualCNN
+  * Semantic audio    — frozen audio encoder (from detector checkpoint)
   * Audio fingerprint — mel-residual -> AudioFingerprintCNN
+  * Physio (rPPG)     — frozen PhysioEncoder (from detector checkpoint)
 
 Audio branches are gated by `has_audio` (B,) so videos without a soundtrack
-contribute a zero audio embedding and don't poison the head.
+contribute a zero audio embedding and don't poison the head. Physio is always
+on when `use_physio=True` (real faces always have a face crop).
 """
 from __future__ import annotations
 from pathlib import Path
@@ -17,7 +19,7 @@ from typing import Optional
 import torch
 import torch.nn as nn
 
-from models.audio_encoder import AudioEncoder
+from models.audio_encoder import build_audio_encoder
 from models.temporal_vit import TemporalViT
 
 from .attribution_head import AttributionHead
@@ -48,6 +50,13 @@ class SourceAttributionModel(nn.Module):
         audio_embed_dim: int = 256,
         audio_fp_dim: int = 256,
         audio_n_mels: int = 80,
+        audio_encoder_kind: str = "cnn",        # "cnn" | "wav2vec"
+        wav2vec_pretrained: str = "facebook/wav2vec2-base",
+        wav2vec_freeze: bool = True,
+        # ----- physio -----
+        use_physio: bool = False,
+        physio_embed_dim: int = 128,
+        physio_fps: float = 4.0,
     ):
         super().__init__()
         if num_classes is None:
@@ -64,10 +73,18 @@ class SourceAttributionModel(nn.Module):
 
         # Audio branches
         self.use_audio = use_audio
+        self.audio_encoder_kind = audio_encoder_kind
         branch_dims = [embed_dim, spectral_dim, residual_dim]
         if use_audio:
-            self.audio_encoder = AudioEncoder(
-                sample_rate=audio_sample_rate, embed_dim=audio_embed_dim, n_mels=audio_n_mels,
+            audio_kwargs = {}
+            if audio_encoder_kind == "wav2vec":
+                audio_kwargs = dict(pretrained=wav2vec_pretrained, freeze=wav2vec_freeze)
+            self.audio_encoder = build_audio_encoder(
+                kind=audio_encoder_kind,
+                sample_rate=audio_sample_rate,
+                embed_dim=audio_embed_dim,
+                **(dict(n_mels=audio_n_mels) if audio_encoder_kind == "cnn" else {}),
+                **audio_kwargs,
             )
             self.audio_fp = AudioFingerprintExtractor(
                 sample_rate=audio_sample_rate, n_mels=audio_n_mels,
@@ -76,6 +93,14 @@ class SourceAttributionModel(nn.Module):
             branch_dims += [audio_embed_dim, audio_fp_dim]
             self.audio_embed_dim = audio_embed_dim
             self.audio_fp_dim = audio_fp_dim
+
+        # Physio branch
+        self.use_physio = use_physio
+        if use_physio:
+            from physio.rppg import PhysioEncoder
+            self.physio = PhysioEncoder(embed_dim=physio_embed_dim, fps=physio_fps)
+            branch_dims.append(physio_embed_dim)
+            self.physio_embed_dim = physio_embed_dim
 
         self.head = AttributionHead(
             branch_dims=branch_dims,
@@ -86,6 +111,7 @@ class SourceAttributionModel(nn.Module):
 
         self._backbone_frozen = False
         self._audio_encoder_frozen = False
+        self._physio_frozen = False
 
     # ------------------------------------------------------------------
     def load_backbone(self, ckpt_path: str | Path, strict: bool = False) -> None:
@@ -115,6 +141,15 @@ class SourceAttributionModel(nn.Module):
                 print("WARN: no `audio.*` keys in detector ckpt — audio encoder "
                       "will be trained from scratch (or stays randomly initialized).")
 
+        if self.use_physio:
+            physio_sd = {k[len("physio."):]: v for k, v in sd.items() if k.startswith("physio.")}
+            if physio_sd:
+                self.physio.load_state_dict(physio_sd, strict=strict)
+                self.freeze_physio()
+            else:
+                print("WARN: no `physio.*` keys in detector ckpt — physio encoder "
+                      "will be trained from scratch.")
+
     def freeze_backbone(self) -> None:
         for p in self.backbone.parameters():
             p.requires_grad = False
@@ -127,12 +162,20 @@ class SourceAttributionModel(nn.Module):
         self.audio_encoder.eval()
         self._audio_encoder_frozen = True
 
+    def freeze_physio(self) -> None:
+        for p in self.physio.parameters():
+            p.requires_grad = False
+        self.physio.eval()
+        self._physio_frozen = True
+
     def train(self, mode: bool = True):
         super().train(mode)
         if self._backbone_frozen:
             self.backbone.eval()
         if self.use_audio and self._audio_encoder_frozen:
             self.audio_encoder.eval()
+        if self.use_physio and self._physio_frozen:
+            self.physio.eval()
         return self
 
     # ------------------------------------------------------------------
@@ -176,6 +219,17 @@ class SourceAttributionModel(nn.Module):
                 a_fp = a_fp * mask
             branches += [a_clip, a_fp]
 
+        # ----- physio (rPPG) -----
+        physio_clip = None
+        if self.use_physio:
+            if self._physio_frozen:
+                with torch.no_grad():
+                    p_out = self.physio(frames)
+            else:
+                p_out = self.physio(frames)
+            physio_clip = p_out["clip"]
+            branches.append(physio_clip)
+
         out = self.head(*branches)
         result = {
             "logits": out["logits"],
@@ -187,4 +241,6 @@ class SourceAttributionModel(nn.Module):
         if self.use_audio:
             result["audio_semantic"] = a_clip
             result["audio_fingerprint"] = a_fp
+        if self.use_physio:
+            result["physio"] = physio_clip
         return result

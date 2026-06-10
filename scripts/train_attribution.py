@@ -26,6 +26,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from attribution.dataset import AttributionDataset                       # noqa: E402
 from attribution.generators import GENERATOR_REGISTRY, num_known_classes  # noqa: E402
+from attribution.losses import SupConLoss                                # noqa: E402
 from attribution.model import SourceAttributionModel                     # noqa: E402
 from attribution.open_set import MahalanobisScorer                       # noqa: E402
 from data.datasets.base import VideoManifest                             # noqa: E402
@@ -88,6 +89,12 @@ def build_model(cfg: dict) -> SourceAttributionModel:
         audio_embed_dim=m.get("audio_embed_dim", 256),
         audio_fp_dim=m.get("audio_fp_dim", 256),
         audio_n_mels=m.get("audio_n_mels", 80),
+        audio_encoder_kind=m.get("audio_encoder", "cnn"),
+        wav2vec_pretrained=m.get("wav2vec_pretrained", "facebook/wav2vec2-base"),
+        wav2vec_freeze=m.get("wav2vec_freeze", True),
+        use_physio=m.get("use_physio", False),
+        physio_embed_dim=m.get("physio_embed_dim", 128),
+        physio_fps=m.get("physio_fps", 4.0),
     )
 
 
@@ -155,6 +162,10 @@ def main() -> None:
 
     opt = torch.optim.AdamW(trainable, lr=cfg["train"]["lr"],
                             weight_decay=cfg["train"]["weight_decay"])
+    supcon_w = float(cfg["train"].get("supcon_weight", 0.0))
+    supcon = SupConLoss(temperature=float(cfg["train"].get("supcon_temperature", 0.1)))
+    if supcon_w > 0:
+        print(f"contrastive provenance loss enabled (weight={supcon_w}, T={supcon.temperature})")
     scaler = torch.cuda.amp.GradScaler(
         enabled=cfg["train"]["amp"] and args.device == "cuda")
     total_steps = cfg["train"]["epochs"] * max(len(train_loader), 1)
@@ -174,13 +185,20 @@ def main() -> None:
             opt.zero_grad(set_to_none=True)
             with torch.cuda.amp.autocast(enabled=scaler.is_enabled()):
                 out = model(frames, waveform=audio, has_audio=has_audio)
-                loss = F.cross_entropy(out["logits"], y, label_smoothing=cfg["train"].get("label_smoothing", 0.0))
+                ce = F.cross_entropy(out["logits"], y, label_smoothing=cfg["train"].get("label_smoothing", 0.0))
+                if supcon_w > 0:
+                    cpl = supcon(out["embed"], y)
+                    loss = ce + supcon_w * cpl
+                else:
+                    cpl = ce.new_zeros(())
+                    loss = ce
             scaler.scale(loss).backward()
             scaler.unscale_(opt)
             torch.nn.utils.clip_grad_norm_(trainable, cfg["train"]["grad_clip"])
             scaler.step(opt); scaler.update()
             if step % 50 == 0:
-                print(f"[e{epoch} s{step}] loss={loss.item():.4f} lr={lr:.2e}")
+                print(f"[e{epoch} s{step}] loss={loss.item():.4f} ce={ce.item():.4f} "
+                      f"cpl={cpl.item():.4f} lr={lr:.2e}")
             step += 1
 
         metrics, embeds, labels = evaluate(model, val_loader, args.device)

@@ -47,3 +47,68 @@ class AudioEncoder(nn.Module):
         seq = h.transpose(1, 2).contiguous()          # (B, T', D)
         clip = seq.mean(dim=1)                        # (B, D)
         return clip, seq
+
+
+class Wav2VecAudioEncoder(nn.Module):
+    """Drop-in replacement using HuggingFace wav2vec2 features.
+
+    Returns the same `(clip, seq)` interface as `AudioEncoder` so the rest of
+    the pipeline doesn't change. The wav2vec2 backbone is loaded lazily and
+    optionally frozen (default: frozen — feature extractor mode).
+    """
+
+    def __init__(
+        self,
+        sample_rate: int = 16000,
+        embed_dim: int = 256,
+        pretrained: str = "facebook/wav2vec2-base",
+        freeze: bool = True,
+    ):
+        super().__init__()
+        try:
+            from transformers import Wav2Vec2Model
+        except ImportError as e:  # pragma: no cover
+            raise RuntimeError(
+                "Wav2VecAudioEncoder requires `pip install transformers`"
+            ) from e
+        if sample_rate != 16000:
+            raise ValueError("wav2vec2-base expects 16 kHz audio")
+        self.backbone = Wav2Vec2Model.from_pretrained(pretrained)
+        self.proj = nn.Linear(self.backbone.config.hidden_size, embed_dim)
+        self.embed_dim = embed_dim
+        self.freeze = freeze
+        if freeze:
+            for p in self.backbone.parameters():
+                p.requires_grad = False
+            self.backbone.eval()
+
+    def train(self, mode: bool = True):
+        super().train(mode)
+        if self.freeze:
+            self.backbone.eval()
+        return self
+
+    def forward(self, waveform: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        # waveform: (B, samples)  float32 in [-1, 1]
+        if self.freeze:
+            with torch.no_grad():
+                h = self.backbone(waveform).last_hidden_state    # (B, T', hidden)
+        else:
+            h = self.backbone(waveform).last_hidden_state
+        seq = self.proj(h)                                       # (B, T', D)
+        clip = seq.mean(dim=1)                                   # (B, D)
+        return clip, seq
+
+
+def build_audio_encoder(
+    kind: str = "cnn",
+    sample_rate: int = 16000,
+    embed_dim: int = 256,
+    **kwargs,
+) -> nn.Module:
+    """Factory: kind in {"cnn", "wav2vec"}."""
+    if kind == "cnn":
+        return AudioEncoder(sample_rate=sample_rate, embed_dim=embed_dim, **kwargs)
+    if kind == "wav2vec":
+        return Wav2VecAudioEncoder(sample_rate=sample_rate, embed_dim=embed_dim, **kwargs)
+    raise ValueError(f"unknown audio encoder kind: {kind!r}")

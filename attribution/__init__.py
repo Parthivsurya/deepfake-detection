@@ -14,6 +14,7 @@ from .fingerprint import (
 )
 from .spectral_cnn import AudioFingerprintCNN, ResidualCNN, SpectralCNN
 from .attribution_head import AttributionHead
+from .losses import SupConLoss
 from .open_set import EnergyScorer, MahalanobisScorer
 from .model import SourceAttributionModel
 
@@ -30,6 +31,7 @@ __all__ = [
     "ResidualCNN",
     "AudioFingerprintCNN",
     "AttributionHead",
+    "SupConLoss",
     "EnergyScorer",
     "MahalanobisScorer",
     "SourceAttributionModel",

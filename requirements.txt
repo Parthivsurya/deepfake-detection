@@ -14,3 +14,5 @@ tqdm>=4.66.0
 PyYAML>=6.0
 pillow>=10.0.0
 tensorboard>=2.15.0
+transformers>=4.40.0
+imageio[ffmpeg]>=2.34.0

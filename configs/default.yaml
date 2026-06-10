@@ -1,9 +1,9 @@
 seed: 42
 
 data:
-  manifest_train: manifests/train.csv
-  manifest_val: manifests/val.csv
-  manifest_test: manifests/test.csv
+  manifest_train: manifests/train.extracted.csv
+  manifest_val: manifests/val.extracted.csv
+  manifest_test: manifests/test.extracted.csv
   frame_root: frames/
   audio_root: audio/
   num_frames: 16
@@ -26,6 +26,14 @@ model:
   fusion_depth: 2
   fusion_heads: 8
   max_audio_tokens: 256
+  # Audio encoder: "cnn" (custom, no extra deps) | "wav2vec" (pretrained, requires transformers)
+  audio_encoder: wav2vec
+  wav2vec_pretrained: facebook/wav2vec2-base
+  wav2vec_freeze: true
+  # rPPG physiological branch (TRINETRA F_P).
+  use_physio: true
+  physio_embed_dim: 128
+  physio_fps: 4.0       # must equal extract_frames.py --fps
 
 train:
   epochs: 30

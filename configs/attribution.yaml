@@ -14,8 +14,7 @@ data:
   batch_size: 8
 
 model:
-  # Must match the detector you trained, since we reuse its TemporalViT
-  # AND AudioEncoder weights.
+  # Must match the detector you trained.
   patch_size: 16
   embed_dim: 384
   spatial_depth: 6
@@ -26,11 +25,18 @@ model:
   spectral_dim: 256
   residual_dim: 256
   head_hidden: 384
-  # Audio branches: frozen AudioEncoder + trainable mel-residual fingerprint CNN.
+  # Audio branches: keep the same kind you used in detection so weights load.
   use_audio: true
+  audio_encoder: wav2vec
+  wav2vec_pretrained: facebook/wav2vec2-base
+  wav2vec_freeze: true
   audio_embed_dim: 256
   audio_fp_dim: 256
   audio_n_mels: 80
+  # Physio branch (rPPG).
+  use_physio: true
+  physio_embed_dim: 128
+  physio_fps: 4.0
   # Path to a detector checkpoint produced by scripts/train.py
   detector_ckpt: checkpoints/best.pt
 
@@ -43,5 +49,8 @@ train:
   amp: true
   balanced: true            # WeightedRandomSampler over generator classes
   label_smoothing: 0.05
+  # Contrastive Provenance Learning (L_CPL): pulls same-generator embeds together.
+  supcon_weight: 0.5
+  supcon_temperature: 0.1
   log_dir: runs/attribution/
   ckpt_dir: checkpoints/
