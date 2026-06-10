@@ -40,11 +40,30 @@ def build_loaders(cfg: dict) -> tuple[DataLoader, DataLoader]:
     )
     train_ds = VideoClipDataset(train_m, training=True, **common)
     val_ds = VideoClipDataset(val_m, training=False, **common)
-    dl = lambda ds, shuf: DataLoader(  # noqa: E731
-        ds, batch_size=cfg["data"]["batch_size"], shuffle=shuf,
-        num_workers=cfg["data"]["num_workers"], pin_memory=True, drop_last=shuf,
+
+    # Class-balanced sampling so the model doesn't collapse to majority-class
+    # predictions, especially when the training set is skewed (e.g., DFDC has
+    # ~3:1 fake:real).
+    sampler = None
+    if cfg["train"].get("balanced_sampling", True):
+        import numpy as _np
+        from torch.utils.data import WeightedRandomSampler as _WRS
+        y = train_m.df["label"].values.astype(int)
+        counts = _np.bincount(y, minlength=2)
+        w = 1.0 / _np.maximum(counts[y], 1)
+        sampler = _WRS(weights=w.tolist(), num_samples=len(y), replacement=True)
+        print(f"[balanced sampler] class counts {counts.tolist()} -> sampling 50/50")
+
+    train_loader = DataLoader(
+        train_ds, batch_size=cfg["data"]["batch_size"],
+        sampler=sampler, shuffle=(sampler is None),
+        num_workers=cfg["data"]["num_workers"], pin_memory=True, drop_last=True,
     )
-    return dl(train_ds, True), dl(val_ds, False)
+    val_loader = DataLoader(
+        val_ds, batch_size=cfg["data"]["batch_size"], shuffle=False,
+        num_workers=cfg["data"]["num_workers"], pin_memory=True,
+    )
+    return train_loader, val_loader
 
 
 def build_model(cfg: dict) -> MultimodalDeepfakeDetector:

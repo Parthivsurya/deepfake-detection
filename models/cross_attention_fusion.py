@@ -130,14 +130,27 @@ class CrossAttentionFusion(nn.Module):
         v = self.v_in(video_tokens) + self.pos_v[:, :T_v] + self.mod_v
         a = self.a_in(audio_tokens) + self.pos_a[:, :T_a] + self.mod_a
 
+        # When the entire batch has no audio (e.g., CDF-only batches), skip the
+        # audio cross-attention path entirely. Otherwise the constant Wav2Vec2
+        # output from zero waveforms dominates the residual stream and the
+        # video encoder receives no gradient signal.
+        batch_all_silent = (
+            has_audio is not None and bool((has_audio < 0.5).all().item())
+        )
+
         # mask out silent clips' audio so video doesn't get poisoned by it
         kpm_a = None
-        if has_audio is not None:
+        if has_audio is not None and not batch_all_silent:
             # True where audio should be ignored
             kpm_a = (has_audio < 0.5).unsqueeze(1).expand(B, T_a)
 
         for blk in self.blocks:
-            v, a = blk(v, a, key_padding_mask_a=kpm_a)
+            if batch_all_silent:
+                # Video-only path: self-attention over video tokens via the
+                # block's MLP + residual; skip cross-attention to audio.
+                v = v + blk.mlp_v(blk.ln_v_mlp(v))
+            else:
+                v, a = blk(v, a, key_padding_mask_a=kpm_a)
 
         v = self.norm_v(v)
         a = self.norm_a(a)
