@@ -135,7 +135,7 @@ def main() -> None:
     eval_paths = args.eval_tasks or args.tasks
 
     model = build_model(cfg).to(args.device)
-    state = torch.load(args.ckpt, map_location=args.device)
+    state = torch.load(args.ckpt, map_location=args.device, weights_only=False)
     model.load_state_dict(state["model"] if "model" in state else state)
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr)

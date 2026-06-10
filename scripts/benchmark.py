@@ -176,7 +176,7 @@ def main() -> None:
     cfg = yaml.safe_load(open(args.config))
     model = build_model(cfg).to(args.device)
     if args.ckpt:
-        state = torch.load(args.ckpt, map_location=args.device)
+        state = torch.load(args.ckpt, map_location=args.device, weights_only=False)
         model.load_state_dict(state["model"] if "model" in state else state)
 
     fp32_params = parameter_count(model)

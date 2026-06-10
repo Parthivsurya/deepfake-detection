@@ -13,6 +13,13 @@ def extract_audio(video_path: str | Path, out_path: str | Path, sample_rate: int
     """
     out_path = Path(out_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        import av
+        with av.open(str(video_path)) as container:
+            if len(container.streams.audio) == 0:
+                return None
+    except Exception:
+        pass
     cmd = [
         "ffmpeg", "-y", "-loglevel", "error",
         "-i", str(video_path),

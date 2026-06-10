@@ -132,14 +132,14 @@ def main() -> None:
                         collate_fn=_collate)
 
     model = build_model(cfg).to(args.device)
-    state = torch.load(args.ckpt, map_location=args.device)
+    state = torch.load(args.ckpt, map_location=args.device, weights_only=False)
     model.load_state_dict(state["model"] if "model" in state else state)
     model.eval()
 
     schedule = DiffusionSchedule(T=args.diffusion_T, schedule=args.diffusion_schedule)
     eps_net = SmallUNet(in_channels=3, base_ch=args.unet_base_ch)
     if args.diffusion_ckpt:
-        eps_state = torch.load(args.diffusion_ckpt, map_location=args.device)
+        eps_state = torch.load(args.diffusion_ckpt, map_location=args.device, weights_only=False)
         eps_net.load_state_dict(eps_state["model"] if "model" in eps_state else eps_state)
     diffusion = DDPM(eps_net=eps_net, schedule=schedule).to(args.device)
 

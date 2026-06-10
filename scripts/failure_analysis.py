@@ -72,7 +72,8 @@ def main() -> None:
     p.add_argument("--config", required=True)
     p.add_argument("--manifest", required=True)
     p.add_argument("--ckpt", required=True)
-    p.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
+    default_device = "cuda" if torch.cuda.is_available() else ("mps" if torch.backends.mps.is_available() else "cpu")
+    p.add_argument("--device", default=default_device)
     p.add_argument("--batch_size", type=int, default=4)
     p.add_argument("--num_workers", type=int, default=2)
     p.add_argument("--attack", default="pgd", choices=["fgsm", "pgd", "cw", "deepfool"],
@@ -104,7 +105,7 @@ def main() -> None:
                         collate_fn=_collate)
 
     model = build_model(cfg).to(args.device)
-    state = torch.load(args.ckpt, map_location=args.device)
+    state = torch.load(args.ckpt, map_location=args.device, weights_only=False)
     model.load_state_dict(state["model"] if "model" in state else state)
     model.eval()
 

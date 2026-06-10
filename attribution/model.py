@@ -120,7 +120,7 @@ class SourceAttributionModel(nn.Module):
         Detector ckpt stores the full MultimodalDeepfakeDetector state-dict
         under "model"; visual.* -> TemporalViT, audio.* -> AudioEncoder.
         """
-        ckpt = torch.load(ckpt_path, map_location="cpu")
+        ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=False)
         sd = ckpt.get("model", ckpt)
 
         visual_sd = {k[len("visual."):]: v for k, v in sd.items() if k.startswith("visual.")}

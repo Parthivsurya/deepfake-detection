@@ -99,7 +99,7 @@ def main() -> None:
     p.add_argument("--json", action="store_true", help="output a single JSON line")
     args = p.parse_args()
 
-    ckpt = torch.load(args.ckpt, map_location="cpu")
+    ckpt = torch.load(args.ckpt, map_location="cpu", weights_only=False)
     cfg = ckpt["cfg"]
     use_audio = cfg["model"].get("use_audio", True)
     model = SourceAttributionModel(

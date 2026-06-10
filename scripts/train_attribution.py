@@ -200,7 +200,7 @@ def main() -> None:
         if not ckpt_path.exists():
             raise FileNotFoundError(f"--resume {ckpt_path} does not exist")
         print(f"resuming from {ckpt_path}")
-        ckpt = torch.load(ckpt_path, map_location=args.device)
+        ckpt = torch.load(ckpt_path, map_location=args.device, weights_only=False)
         _unwrap(model).load_state_dict(ckpt["model"], strict=False)
         if "optimizer" in ckpt:
             opt.load_state_dict(ckpt["optimizer"])
