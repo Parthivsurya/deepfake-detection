@@ -215,16 +215,25 @@ def main() -> None:
         best_f1 = float(ckpt.get("metrics", {}).get("f1_macro", best_f1))
         print(f"  resumed at epoch {start_epoch}, step {step}, best_f1 {best_f1:.4f}")
 
+    # Gradient accumulation: simulate a larger effective batch using N micro-
+    # batches, keeping peak memory low. Set cfg.train.grad_accum_steps > 1 to
+    # enable. effective_batch_size = batch_size * grad_accum_steps.
+    accum = int(cfg["train"].get("grad_accum_steps", 1))
+    if accum > 1:
+        print(f"gradient accumulation enabled: {accum} micro-steps per optimizer step "
+              f"(effective batch = {cfg['data']['batch_size'] * accum})")
+
     # ---------------- train ----------------
     for epoch in range(start_epoch, cfg["train"]["epochs"]):
         model.train()
+        opt.zero_grad(set_to_none=True)
+        micro = 0
         for batch in train_loader:
             frames, audio, has_audio = _batch_to_device(model, batch, args.device)
             y = batch["generator_id"].to(args.device, non_blocking=True)
             lr = cosine_lr(step, total_steps, warmup, cfg["train"]["lr"])
             for g in opt.param_groups:
                 g["lr"] = lr
-            opt.zero_grad(set_to_none=True)
             with torch.amp.autocast("cuda", enabled=amp_enabled):
                 out = model(frames, waveform=audio, has_audio=has_audio)
                 ce = F.cross_entropy(out["logits"], y,
@@ -235,12 +244,18 @@ def main() -> None:
                 else:
                     cpl = ce.new_zeros(())
                     loss = ce
+                if accum > 1:
+                    loss = loss / accum
             scaler.scale(loss).backward()
-            scaler.unscale_(opt)
-            torch.nn.utils.clip_grad_norm_(trainable, cfg["train"]["grad_clip"])
-            scaler.step(opt); scaler.update()
+            micro += 1
+            if micro >= accum:
+                scaler.unscale_(opt)
+                torch.nn.utils.clip_grad_norm_(trainable, cfg["train"]["grad_clip"])
+                scaler.step(opt); scaler.update()
+                opt.zero_grad(set_to_none=True)
+                micro = 0
             if step % 50 == 0:
-                print(f"[e{epoch} s{step}] loss={loss.item():.4f} ce={ce.item():.4f} "
+                print(f"[e{epoch} s{step}] loss={loss.item() * accum:.4f} ce={ce.item():.4f} "
                       f"cpl={cpl.item():.4f} lr={lr:.2e}")
             step += 1
 
