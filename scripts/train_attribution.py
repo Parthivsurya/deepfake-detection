@@ -103,6 +103,7 @@ def build_model(cfg: dict) -> SourceAttributionModel:
         use_physio=m.get("use_physio", False),
         physio_embed_dim=m.get("physio_embed_dim", 128),
         physio_fps=m.get("physio_fps", 4.0),
+        backbone=m.get("backbone", "temporal_vit"),
     )
 
 

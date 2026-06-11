@@ -20,7 +20,7 @@ import torch
 import torch.nn as nn
 
 from models.audio_encoder import build_audio_encoder
-from models.temporal_vit import TemporalViT
+from models.pretrained_backbone import build_visual_backbone
 
 from .attribution_head import AttributionHead
 from .fingerprint import AudioFingerprintExtractor, FingerprintExtractor
@@ -57,15 +57,29 @@ class SourceAttributionModel(nn.Module):
         use_physio: bool = False,
         physio_embed_dim: int = 128,
         physio_fps: float = 4.0,
+        # ----- backbone -----
+        # Must match the detector that produced detector_ckpt, otherwise
+        # state_dict keys don't align and load_backbone silently leaves the
+        # visual encoder at random init (which collapses to NaN under AMP).
+        backbone: str = "temporal_vit",      # "temporal_vit" | "resnet50"
     ):
         super().__init__()
         if num_classes is None:
             num_classes = num_known_classes()
 
         # Video branches
-        self.backbone = TemporalViT(
-            image_size, patch_size, embed_dim, spatial_depth,
-            temporal_depth, num_heads, mlp_ratio, dropout, max_frames,
+        self.backbone_kind = backbone
+        self.backbone = build_visual_backbone(
+            kind=backbone,
+            image_size=image_size,
+            embed_dim=embed_dim,
+            temporal_depth=temporal_depth,
+            num_heads=num_heads,
+            mlp_ratio=mlp_ratio,
+            dropout=dropout,
+            max_frames=max_frames,
+            patch_size=patch_size,
+            spatial_depth=spatial_depth,
         )
         self.fingerprint = FingerprintExtractor()
         self.spectral_cnn = SpectralCNN(in_channels=3, embed_dim=spectral_dim)

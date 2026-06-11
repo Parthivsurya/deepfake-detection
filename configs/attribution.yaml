@@ -14,7 +14,10 @@ data:
   batch_size: 8
 
 model:
-  # Must match the detector you trained.
+  # Must match the detector you trained — same `backbone` so state_dict keys
+  # align, otherwise load_backbone leaves the visual encoder at random init
+  # and FP16 autocast collapses to NaN. Session-4 detector used resnet50.
+  backbone: resnet50
   patch_size: 16
   embed_dim: 384
   spatial_depth: 6
@@ -33,7 +36,8 @@ model:
   audio_embed_dim: 256
   audio_fp_dim: 256
   audio_n_mels: 80
-  # Physio branch (rPPG).
+  # Physio branch (rPPG). Session-4 detector had use_physio: true so its
+  # physio.* keys exist in the checkpoint.
   use_physio: true
   physio_embed_dim: 128
   physio_fps: 4.0
