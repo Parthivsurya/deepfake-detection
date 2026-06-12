@@ -49,6 +49,12 @@ def build_model(cfg: dict) -> MultimodalDeepfakeDetector:
         max_audio_tokens=m.get("max_audio_tokens", 256),
         backbone=m.get("backbone", "temporal_vit"),
         backbone_freeze=m.get("backbone_freeze", True),
+        audio_encoder=m.get("audio_encoder", "cnn"),
+        wav2vec_pretrained=m.get("wav2vec_pretrained", "facebook/wav2vec2-base"),
+        wav2vec_freeze=m.get("wav2vec_freeze", True),
+        use_physio=m.get("use_physio", False),
+        physio_embed_dim=m.get("physio_embed_dim", 128),
+        physio_fps=m.get("physio_fps", 4.0),
     )
 
 
