@@ -67,6 +67,8 @@ def build_model(cfg: dict) -> MultimodalDeepfakeDetector:
         fusion_depth=m.get("fusion_depth", 2),
         fusion_heads=m.get("fusion_heads", 8),
         max_audio_tokens=m.get("max_audio_tokens", 256),
+        backbone=m.get("backbone", "temporal_vit"),
+        backbone_freeze=m.get("backbone_freeze", True),
     )
 
 
@@ -178,7 +180,7 @@ def main() -> None:
         labels = batch["label"].to(args.device)
 
         if attack is not None:
-            res = attack.perturb(frames, audio, labels, has_audio=has_audio)
+            res = attack.perturb(frames, audio, has_audio, labels)
             frames = res.frames_adv
 
         out = pipeline.run(frames, audio, has_audio=has_audio)
