@@ -14,9 +14,11 @@ data:
   batch_size: 8
 
 model:
-  # Visual backbone: "resnet50" (ImageNet-pretrained, recommended for small data)
-  # or "temporal_vit" (trained from scratch — needs much more data).
-  backbone: resnet50
+  # Visual backbone:
+  #   "efficientnet_b0" — 5.3M params, lightweight-edge default (RDD spec).
+  #   "resnet50"        — 25.6M params, prior default (Session 4 headline).
+  #   "temporal_vit"    — from scratch; needs much more data.
+  backbone: efficientnet_b0
   backbone_freeze: true
   patch_size: 16
   embed_dim: 384

@@ -16,8 +16,10 @@ data:
 model:
   # Must match the detector you trained — same `backbone` so state_dict keys
   # align, otherwise load_backbone leaves the visual encoder at random init
-  # and FP16 autocast collapses to NaN. Session-4 detector used resnet50.
-  backbone: resnet50
+  # and FP16 autocast collapses to NaN. Switched to efficientnet_b0 for the
+  # lightweight-edge redesign; if loading the Session-4 ckpt set this back
+  # to "resnet50".
+  backbone: efficientnet_b0
   patch_size: 16
   embed_dim: 384
   spatial_depth: 6
