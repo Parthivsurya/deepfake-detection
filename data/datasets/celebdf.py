@@ -37,7 +37,15 @@ class CelebDFBuilder:
             d = self.root / sub
             if not d.exists():
                 continue
-            for v in sorted(d.glob("*.mp4")):
+            # Handle the doubled-folder zip quirk: when the dataset is uploaded
+            # straight from the official zip, videos live under <root>/<sub>/<sub>/
+            # instead of <root>/<sub>/. Detect by checking for mp4s one level deeper.
+            videos = sorted(d.glob("*.mp4"))
+            if not videos:
+                nested = d / sub
+                if nested.is_dir():
+                    videos = sorted(nested.glob("*.mp4"))
+            for v in videos:
                 rows.append({
                     "clip_id": f"cdf_{sub.lower()}_{v.stem}",
                     "video_path": str(v),
