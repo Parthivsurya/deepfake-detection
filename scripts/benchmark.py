@@ -65,7 +65,34 @@ def build_model(cfg: dict) -> MultimodalDeepfakeDetector:
         fusion_depth=m.get("fusion_depth", 2),
         fusion_heads=m.get("fusion_heads", 8),
         max_audio_tokens=m.get("max_audio_tokens", 256),
+        audio_encoder=m.get("audio_encoder", "cnn"),
+        wav2vec_pretrained=m.get("wav2vec_pretrained", "facebook/wav2vec2-base"),
+        wav2vec_freeze=m.get("wav2vec_freeze", True),
+        use_physio=m.get("use_physio", False),
+        physio_embed_dim=m.get("physio_embed_dim", 128),
+        physio_fps=m.get("physio_fps", 4.0),
+        backbone=m.get("backbone", "temporal_vit"),
+        backbone_freeze=m.get("backbone_freeze", True),
     )
+
+
+def merge_ckpt_cfg(cfg: dict, state: dict) -> dict:
+    """Prefer the model/data hyper-params recorded inside the checkpoint, so a
+    checkpoint trained with a different backbone than the YAML on disk is
+    benchmarked as the architecture it actually is."""
+    ck = state.get("cfg")
+    if not isinstance(ck, dict):
+        return cfg
+    if "model" in ck:
+        cfg["model"] = ck["model"]
+        print(f"[benchmark] using model config from checkpoint "
+              f"(backbone={ck['model'].get('backbone')}, "
+              f"audio_encoder={ck['model'].get('audio_encoder')}, "
+              f"use_physio={ck['model'].get('use_physio')})")
+    for key in ("num_frames", "frame_size", "audio_sample_rate", "audio_seconds"):
+        if "data" in ck and key in ck["data"]:
+            cfg["data"][key] = ck["data"][key]
+    return cfg
 
 
 def model_size_bytes(model: torch.nn.Module) -> int:
@@ -165,6 +192,8 @@ def main() -> None:
     p.add_argument("--ckpt", default=None, help="optional .pt checkpoint to load before benchmarking")
     p.add_argument("--video", default=None, help="optional real video clip for realistic timings")
     p.add_argument("--audio", default=None, help="optional real audio file paired with --video")
+    p.add_argument("--flops", action="store_true",
+                   help="count FLOPs per clip via fvcore (pip install fvcore)")
     p.add_argument("--out", default=None, help="optional JSON dump path")
     args = p.parse_args()
 
@@ -174,9 +203,12 @@ def main() -> None:
         raise SystemExit("dynamic quantization requires --device cpu")
 
     cfg = yaml.safe_load(open(args.config))
-    model = build_model(cfg).to(args.device)
+    state = None
     if args.ckpt:
-        state = torch.load(args.ckpt, map_location=args.device, weights_only=False)
+        state = torch.load(args.ckpt, map_location="cpu", weights_only=False)
+        cfg = merge_ckpt_cfg(cfg, state)
+    model = build_model(cfg).to(args.device)
+    if state is not None:
         model.load_state_dict(state["model"] if "model" in state else state)
 
     fp32_params = parameter_count(model)
@@ -193,6 +225,18 @@ def main() -> None:
 
     inputs = (real_inputs(cfg, args.video, args.audio, args.device)
               if args.video else synth_inputs(cfg, args.device))
+
+    flops_g = None
+    if args.flops:
+        try:
+            from fvcore.nn import FlopCountAnalysis
+            fca = FlopCountAnalysis(model, inputs)
+            fca.unsupported_ops_warnings(False)
+            fca.uncalled_modules_warnings(False)
+            flops_g = float(fca.total()) / 1e9
+        except Exception as e:  # fvcore missing or tracing failure — report, don't die
+            print(f"[flops] skipped: {e}")
+
     metrics = benchmark(model, inputs, iters=args.iters, warmup=args.warmup, device=args.device)
 
     clip_seconds = cfg["data"]["num_frames"] / 4.0    # frames sampled at 4 fps in extractor
@@ -207,6 +251,9 @@ def main() -> None:
         "compression_ratio": fp32_size / max(final_size, 1),
         "fps_effective": cfg["data"]["num_frames"] / (metrics["latency_ms_mean"] / 1000.0),
         "realtime_factor": clip_seconds / (metrics["latency_ms_mean"] / 1000.0),
+        "flops_g_per_clip": flops_g,
+        "backbone": cfg["model"].get("backbone"),
+        "ckpt": args.ckpt,
     })
 
     print(json.dumps(metrics, indent=2))
