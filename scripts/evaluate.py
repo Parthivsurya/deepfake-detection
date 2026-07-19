@@ -67,7 +67,37 @@ def build_model(cfg: dict) -> MultimodalDeepfakeDetector:
         fusion_depth=m.get("fusion_depth", 2),
         fusion_heads=m.get("fusion_heads", 8),
         max_audio_tokens=m.get("max_audio_tokens", 256),
+        audio_encoder=m.get("audio_encoder", "cnn"),
+        wav2vec_pretrained=m.get("wav2vec_pretrained", "facebook/wav2vec2-base"),
+        wav2vec_freeze=m.get("wav2vec_freeze", True),
+        use_physio=m.get("use_physio", False),
+        physio_embed_dim=m.get("physio_embed_dim", 128),
+        physio_fps=m.get("physio_fps", 4.0),
+        backbone=m.get("backbone", "temporal_vit"),
+        backbone_freeze=m.get("backbone_freeze", True),
     )
+
+
+def merge_ckpt_cfg(cfg: dict, state: dict) -> dict:
+    """Prefer the model/data hyper-params recorded inside the checkpoint.
+
+    A checkpoint trained with a different backbone (or audio encoder, physio
+    flag, frame count, ...) than the YAML on disk would otherwise fail to load
+    or silently evaluate a mismatched architecture.
+    """
+    ck = state.get("cfg")
+    if not isinstance(ck, dict):
+        return cfg
+    if "model" in ck:
+        cfg["model"] = ck["model"]
+        print(f"[evaluate] using model config from checkpoint "
+              f"(backbone={ck['model'].get('backbone')}, "
+              f"audio_encoder={ck['model'].get('audio_encoder')}, "
+              f"use_physio={ck['model'].get('use_physio')})")
+    for key in ("num_frames", "frame_size", "audio_sample_rate", "audio_seconds"):
+        if "data" in ck and key in ck["data"]:
+            cfg["data"][key] = ck["data"][key]
+    return cfg
 
 
 def run_inference(
@@ -116,6 +146,9 @@ def evaluate(args) -> dict:
     cfg = yaml.safe_load(open(args.config))
     torch.manual_seed(cfg["seed"]); np.random.seed(cfg["seed"])
 
+    state = torch.load(args.ckpt, map_location="cpu", weights_only=False)
+    cfg = merge_ckpt_cfg(cfg, state)
+
     manifest = VideoManifest.load(args.manifest)
     # carry `dataset` through to the loader for per-dataset slicing
     ds = VideoClipDataset(
@@ -144,7 +177,6 @@ def evaluate(args) -> dict:
     )
 
     model = build_model(cfg).to(args.device)
-    state = torch.load(args.ckpt, map_location=args.device, weights_only=False)
     model.load_state_dict(state["model"] if "model" in state else state)
 
     params = parameter_count(model)
@@ -197,6 +229,18 @@ def evaluate(args) -> dict:
         "per_dataset": per_dataset,
         "latency": lat,
     }
+
+    if args.save_scores:
+        import pandas as pd
+        Path(args.save_scores).parent.mkdir(parents=True, exist_ok=True)
+        pd.DataFrame({
+            "clip_id": result["clip_ids"],
+            "dataset": result["datasets"] if result["datasets"]
+                       else [""] * len(result["labels"]),
+            "label": result["labels"].astype(int),
+            "prob_fake": result["probs"],
+        }).to_csv(args.save_scores, index=False)
+        print(f"[evaluate] wrote per-clip scores -> {args.save_scores}")
     return report
 
 
@@ -213,6 +257,9 @@ def main() -> None:
     p.add_argument("--prune", type=float, default=0.0)
     p.add_argument("--quantize", action="store_true")
     p.add_argument("--out", default=None, help="optional JSON output path")
+    p.add_argument("--save_scores", default=None,
+                   help="optional CSV path for per-clip P(fake) scores "
+                        "(needed for ROC/PR curves)")
     args = p.parse_args()
 
     report = evaluate(args)
