@@ -9,6 +9,7 @@ from .audio_encoder import build_audio_encoder
 from .av_sync import AVSyncHead
 from .cross_attention_fusion import CrossAttentionFusion
 from .pretrained_backbone import build_visual_backbone
+from .trust import TrustReliabilityEstimator, TrustAwareSparseGate
 
 
 class MultimodalDeepfakeDetector(nn.Module):
@@ -39,6 +40,10 @@ class MultimodalDeepfakeDetector(nn.Module):
         physio_fps: float = 4.0,
         backbone: str = "temporal_vit",      # "temporal_vit" | "resnet50"
         backbone_freeze: bool = True,        # only applies to pretrained backbones
+        # ----- TRUSTFUSE reliability (TRE + TSF) -----
+        use_trust: bool = False,             # False = baseline (no reliability)
+        trust_dim: int = 128,                # common trust-space dim for Eqs 1-3
+        trust_tau: float = 0.5,              # TSF gate threshold τ (Eq. 7)
     ):
         super().__init__()
         self.visual = build_visual_backbone(
@@ -82,6 +87,25 @@ class MultimodalDeepfakeDetector(nn.Module):
         else:
             extra_dim = 0
 
+        # ---------------- TRUSTFUSE reliability (TRE + TSF) ----------------
+        # TRE estimates a per-modality trust score R_m ∈ [0,1]; TSF gates each
+        # modality's contribution by R_m before fusion (Eq. 7). Per-modality
+        # linear projections bring V/A/(P) into a common trust space so the
+        # cross-modal cosine agreement (Eq. 3) is well-defined across differing
+        # feature dims. The gate then scales the *original* features by the
+        # scalar R_m, so gating is dimension-agnostic and faithful to Eq. 7.
+        self.use_trust = use_trust
+        if use_trust:
+            self.trust_proj = nn.ModuleDict({
+                "V": nn.Linear(embed_dim, trust_dim),
+                "A": nn.Linear(audio_embed_dim, trust_dim),
+            })
+            if use_physio:
+                self.trust_proj["P"] = nn.Linear(physio_embed_dim, trust_dim)
+            self.tre = TrustReliabilityEstimator(
+                num_modalities=3 if use_physio else 2)
+            self.trust_gate = TrustAwareSparseGate(tau=trust_tau)
+
         # +1 for the scalar AV-sync score concatenated as an extra feature
         self.classifier = nn.Sequential(
             nn.Linear(fusion_dim + 1 + extra_dim, fusion_dim),
@@ -98,15 +122,41 @@ class MultimodalDeepfakeDetector(nn.Module):
     ) -> dict:
         _, v_tokens = self.visual(frames)
         _, a_tokens = self.audio(waveform)
+
+        # physio is needed up-front when TRE is on (it consumes the rPPG seq).
+        physio_out = self.physio(frames) if self.use_physio else None
+
+        # ---------------- TRE + TSF trust gating ----------------
+        trust_loss = None
+        trust_scores = None
+        if self.use_trust:
+            feats = {
+                "V": self.trust_proj["V"](v_tokens),          # (B, Tv, trust_dim)
+                "A": self.trust_proj["A"](a_tokens),          # (B, Ta, trust_dim)
+            }
+            if self.use_physio:
+                feats["P"] = self.trust_proj["P"](physio_out["seq"])  # (B, Tp, trust_dim)
+            # same projected sequences drive both the C/A terms and the temporal
+            # stability term T (consecutive-token differences).
+            tre_out = self.tre(feats, modality_feats_temporal=feats)
+            trust_scores = tre_out["trust"]                   # {name: (B,)}
+            trust_loss = tre_out["loss"]
+            # Eq. 7 — scale the *original* features by the scalar trust R_m.
+            v_tokens = self.trust_gate(v_tokens, trust_scores["V"])
+            a_tokens = self.trust_gate(a_tokens, trust_scores["A"])
+
         sync = self.av_sync(v_tokens, a_tokens, has_audio=has_audio)
 
         fused_out = self.fusion(v_tokens, a_tokens, has_audio=has_audio)
         parts = [fused_out["fused"], sync["sync_score"].unsqueeze(-1)]
 
-        physio_out = None
-        if self.use_physio:
-            physio_out = self.physio(frames)
-            parts.append(physio_out["clip"])
+        if physio_out is not None:
+            physio_clip = physio_out["clip"]
+            if self.use_trust:
+                # gate the (B, D) clip embedding by R_P via a temporary token axis
+                physio_clip = self.trust_gate(
+                    physio_clip.unsqueeze(1), trust_scores["P"]).squeeze(1)
+            parts.append(physio_clip)
 
         fused = torch.cat(parts, dim=-1)
         logits = self.classifier(fused)
@@ -121,4 +171,7 @@ class MultimodalDeepfakeDetector(nn.Module):
         if physio_out is not None:
             result["physio_embed"] = physio_out["clip"]
             result["physio_signal"] = physio_out["signal"]
+        if trust_loss is not None:
+            result["trust_loss"] = trust_loss
+            result["trust"] = {k: v.detach() for k, v in trust_scores.items()}
         return result

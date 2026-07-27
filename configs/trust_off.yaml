@@ -1,0 +1,52 @@
+seed: 42
+
+# ===== ABLATION: reliability OFF (baseline, "without reliability") =====
+# Identical to trust_on.yaml except use_trust=false + trust_loss_weight=0.
+data:
+  manifest_train: manifests/train.extracted.csv
+  manifest_val: manifests/val.extracted.csv
+  manifest_test: manifests/test.extracted.csv
+  frame_root: frames/
+  audio_root: audio/
+  num_frames: 16
+  frame_size: 224
+  audio_sample_rate: 16000
+  audio_seconds: 4.0
+  num_workers: 4
+  batch_size: 8
+
+model:
+  backbone: efficientnet_b0
+  backbone_freeze: true
+  patch_size: 16
+  embed_dim: 384
+  spatial_depth: 6
+  temporal_depth: 4
+  num_heads: 6
+  mlp_ratio: 4.0
+  dropout: 0.1
+  audio_embed_dim: 256
+  fusion_dim: 512
+  fusion_depth: 2
+  fusion_heads: 8
+  max_audio_tokens: 256
+  audio_encoder: wav2vec
+  wav2vec_pretrained: facebook/wav2vec2-base
+  wav2vec_freeze: true
+  use_physio: true
+  physio_embed_dim: 128
+  physio_fps: 4.0
+  # ----- reliability OFF -----
+  use_trust: false
+
+train:
+  epochs: 30
+  lr: 1.0e-4
+  weight_decay: 0.05
+  warmup_epochs: 2
+  grad_clip: 1.0
+  amp: true
+  log_dir: runs/trust_off/
+  ckpt_dir: checkpoints/trust_off/
+  sync_loss_weight: 0.2
+  trust_loss_weight: 0.0

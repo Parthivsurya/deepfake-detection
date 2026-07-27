@@ -92,6 +92,9 @@ def build_model(cfg: dict) -> MultimodalDeepfakeDetector:
         physio_fps=m.get("physio_fps", 4.0),
         backbone=m.get("backbone", "temporal_vit"),
         backbone_freeze=m.get("backbone_freeze", True),
+        use_trust=m.get("use_trust", False),
+        trust_dim=m.get("trust_dim", 128),
+        trust_tau=m.get("trust_tau", 0.5),
     )
 
 
@@ -107,7 +110,7 @@ def _unwrap(model: nn.Module) -> nn.Module:
     return model.module if isinstance(model, nn.DataParallel) else model
 
 
-def step_batch(model, batch, device, sync_weight: float):
+def step_batch(model, batch, device, sync_weight: float, trust_weight: float = 0.0):
     frames = batch["frames"].to(device, non_blocking=True)
     audio = batch["audio"].to(device, non_blocking=True)
     has_audio = batch["has_audio"].to(device, non_blocking=True)
@@ -119,6 +122,12 @@ def step_batch(model, batch, device, sync_weight: float):
     if sync_loss.dim() > 0:
         sync_loss = sync_loss.mean()
     loss = ce + sync_weight * sync_loss
+    # TRE reliability loss L_trust (Eq. 6), added only when trust is enabled.
+    trust_loss = out.get("trust_loss")
+    if trust_loss is not None:
+        if trust_loss.dim() > 0:
+            trust_loss = trust_loss.mean()
+        loss = loss + trust_weight * trust_loss
     return loss, ce, sync_loss, out["logits"], labels
 
 
@@ -172,6 +181,7 @@ def main() -> None:
     total_steps = cfg["train"]["epochs"] * max(len(train_loader), 1)
     warmup = cfg["train"]["warmup_epochs"] * max(len(train_loader), 1)
     sync_w = cfg["train"]["sync_loss_weight"]
+    trust_w = cfg["train"].get("trust_loss_weight", 0.0)
 
     ckpt_dir = Path(cfg["train"]["ckpt_dir"]); ckpt_dir.mkdir(parents=True, exist_ok=True)
     best_auc = -1.0
@@ -210,7 +220,7 @@ def main() -> None:
                 g["lr"] = lr
             opt.zero_grad(set_to_none=True)
             with torch.amp.autocast("cuda", enabled=amp_enabled):
-                loss, ce, sl, _, _ = step_batch(model, batch, args.device, sync_w)
+                loss, ce, sl, _, _ = step_batch(model, batch, args.device, sync_w, trust_w)
             scaler.scale(loss).backward()
             scaler.unscale_(opt)
             torch.nn.utils.clip_grad_norm_(model.parameters(), cfg["train"]["grad_clip"])

@@ -75,6 +75,9 @@ def build_model(cfg: dict) -> MultimodalDeepfakeDetector:
         physio_fps=m.get("physio_fps", 4.0),
         backbone=m.get("backbone", "temporal_vit"),
         backbone_freeze=m.get("backbone_freeze", True),
+        use_trust=m.get("use_trust", False),
+        trust_dim=m.get("trust_dim", 128),
+        trust_tau=m.get("trust_tau", 0.5),
     )
 
 
