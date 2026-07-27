@@ -113,8 +113,14 @@ def run_inference(
     cuda = device.startswith("cuda")
     probs, labels, datasets, sync, clip_ids = [], [], [], [], []
     latencies_ms: list[float] = []
+    print(f"[evaluate] model built — starting inference over {len(loader)} batches", flush=True)
+    try:
+        from tqdm import tqdm
+        _iter = tqdm(loader, total=len(loader), desc="infer", dynamic_ncols=True)
+    except Exception:
+        _iter = loader
     with torch.inference_mode():
-        for batch in loader:
+        for batch in _iter:
             frames = batch["frames"].to(device, non_blocking=True)
             audio = batch["audio"].to(device, non_blocking=True)
             has_audio = batch["has_audio"].to(device, non_blocking=True)
