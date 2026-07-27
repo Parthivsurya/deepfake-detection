@@ -160,6 +160,10 @@ def main() -> None:
     p.add_argument("--resume", type=str, default=None,
                    help="path to a previous checkpoint; restores model, optimizer, "
                         "scaler, step counter, and best_auc.")
+    p.add_argument("--init_from", type=str, default=None,
+                   help="warm-start: load matching weights from a checkpoint "
+                        "(strict=False, weights only — fresh optimizer/epochs). "
+                        "New params (e.g. TRE) start randomly. Ignored if --resume set.")
     args = p.parse_args()
 
     cfg = yaml.safe_load(open(args.config))
@@ -167,6 +171,18 @@ def main() -> None:
 
     train_loader, val_loader = build_loaders(cfg)
     model = build_model(cfg).to(args.device)
+
+    # ---------------- warm-start (weights only, non-strict) ----------------
+    if args.init_from and not args.resume:
+        ck = torch.load(args.init_from, map_location=args.device, weights_only=False)
+        sd = ck.get("model", ck)
+        res = model.load_state_dict(sd, strict=False)
+        loaded = len(sd) - len(res.unexpected_keys)
+        print(f"[init_from] {args.init_from}: loaded ~{loaded} tensors, "
+              f"{len(res.missing_keys)} new/random (e.g. TRE), "
+              f"{len(res.unexpected_keys)} unused from ckpt")
+        if res.missing_keys:
+            print("  new params:", [k for k in res.missing_keys][:8], "...")
 
     # Multi-GPU on CUDA when device_count > 1 (e.g., Kaggle T4 x2).
     use_dp = args.device == "cuda" and torch.cuda.device_count() > 1
