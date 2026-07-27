@@ -73,7 +73,17 @@ class Wav2VecAudioEncoder(nn.Module):
             ) from e
         if sample_rate != 16000:
             raise ValueError("wav2vec2-base expects 16 kHz audio")
-        self.backbone = Wav2Vec2Model.from_pretrained(pretrained)
+        # When restoring from a checkpoint (e.g. eval), the wav2vec weights come
+        # from the checkpoint, so we can build the architecture from config with
+        # NO network download. Set DDET_WAV2VEC_FROM_CONFIG=1 to avoid the (often
+        # slow/hanging) HuggingFace hub fetch. Training leaves it unset to get the
+        # real pretrained weights.
+        import os as _os
+        if _os.environ.get("DDET_WAV2VEC_FROM_CONFIG") == "1":
+            from transformers import Wav2Vec2Config
+            self.backbone = Wav2Vec2Model(Wav2Vec2Config())
+        else:
+            self.backbone = Wav2Vec2Model.from_pretrained(pretrained)
         self.proj = nn.Linear(self.backbone.config.hidden_size, embed_dim)
         self.embed_dim = embed_dim
         self.freeze = freeze

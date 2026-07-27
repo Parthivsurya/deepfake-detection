@@ -98,8 +98,13 @@ class EfficientNetB0Backbone(nn.Module):
         freeze: bool = True,
     ):
         super().__init__()
+        import os as _os
         from torchvision.models import efficientnet_b0, EfficientNet_B0_Weights
-        weights = EfficientNet_B0_Weights.IMAGENET1K_V1
+        # For eval the ImageNet weights are overwritten by the checkpoint, so we
+        # can skip the download with DDET_BACKBONE_NO_PRETRAINED=1 (avoids the
+        # torchvision hub fetch that stalls on flaky networks).
+        weights = None if _os.environ.get("DDET_BACKBONE_NO_PRETRAINED") == "1" \
+            else EfficientNet_B0_Weights.IMAGENET1K_V1
         m = efficientnet_b0(weights=weights)
         # features (conv stack) + avgpool; drop classifier (Dropout + Linear)
         self.backbone = nn.Sequential(m.features, m.avgpool)
