@@ -115,8 +115,13 @@ class TrustReliabilityEstimator(nn.Module):
         self.agreement_to_unit = agreement_to_unit
         # w1, w2, w3 and bias b from Eq. 5 — shared across modalities so a single
         # learned reliability rule applies to V/A/P.
+        # b is initialised high (sigmoid(b0) ~ 0.95) so every modality starts
+        # *fully trusted*: the TSF gate begins as near-identity and does not
+        # disrupt pretrained/warm-started features. TRE then learns to lower R_m
+        # only for modalities it finds unreliable (standard gated-module init,
+        # cf. ReZero / LoRA zero-init). Set b0=0 to recover the original Eq. 5.
         self.w = nn.Parameter(torch.ones(3))   # [w1, w2, w3]
-        self.b = nn.Parameter(torch.zeros(1))
+        self.b = nn.Parameter(torch.full((1,), 3.0))
 
     def forward(
         self,

@@ -51,4 +51,4 @@ train:
   log_dir: runs/trust_on/
   ckpt_dir: checkpoints/trust_on/
   sync_loss_weight: 0.2
-  trust_loss_weight: 0.5
+  trust_loss_weight: 0.1
