@@ -176,11 +176,15 @@ def main() -> None:
     if args.init_from and not args.resume:
         ck = torch.load(args.init_from, map_location=args.device, weights_only=False)
         sd = ck.get("model", ck)
-        res = model.load_state_dict(sd, strict=False)
-        loaded = len(sd) - len(res.unexpected_keys)
-        print(f"[init_from] {args.init_from}: loaded ~{loaded} tensors, "
-              f"{len(res.missing_keys)} new/random (e.g. TRE), "
-              f"{len(res.unexpected_keys)} unused from ckpt")
+        # keep only keys that exist AND match shape, so a slightly different
+        # config can't crash the warm-start (shape mismatch would otherwise raise).
+        own = model.state_dict()
+        keep = {k: v for k, v in sd.items() if k in own and own[k].shape == v.shape}
+        skipped = len(sd) - len(keep)
+        res = model.load_state_dict(keep, strict=False)
+        print(f"[init_from] {args.init_from}: loaded {len(keep)} tensors, "
+              f"{skipped} skipped (shape/name mismatch), "
+              f"{len(res.missing_keys)} new/random (e.g. TRE)")
         if res.missing_keys:
             print("  new params:", [k for k in res.missing_keys][:8], "...")
 
