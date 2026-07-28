@@ -94,6 +94,12 @@ class VideoClipDataset(Dataset):
             return np.zeros((self.num_frames, 3, self.frame_size, self.frame_size), dtype=np.float32)
         paths = sorted(Path(frames_dir).glob("frame_*.jpg"))
         if not paths:
+            # fall back to any images in the folder (other datasets name frames
+            # differently, e.g. pre-extracted face crops <id>_<frame>_<face>.png)
+            fd = Path(frames_dir)
+            paths = sorted(p for e in ("*.jpg", "*.jpeg", "*.png")
+                           for p in fd.glob(e))
+        if not paths:
             return np.zeros((self.num_frames, 3, self.frame_size, self.frame_size), dtype=np.float32)
         idx = self._sample_indices(len(paths))
         out = np.empty((self.num_frames, 3, self.frame_size, self.frame_size), dtype=np.float32)
