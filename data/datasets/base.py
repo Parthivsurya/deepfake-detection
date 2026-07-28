@@ -103,12 +103,21 @@ class VideoClipDataset(Dataset):
             return np.zeros((self.num_frames, 3, self.frame_size, self.frame_size), dtype=np.float32)
         idx = self._sample_indices(len(paths))
         out = np.empty((self.num_frames, 3, self.frame_size, self.frame_size), dtype=np.float32)
+        # clip-level augmentation (decided once, applied to every frame so the
+        # clip stays temporally consistent). Training only.
+        do_flip = self.training and (np.random.rand() < 0.5)
+        bright = np.random.uniform(-0.12, 0.12) if self.training else 0.0
+        contrast = 1.0 + np.random.uniform(-0.12, 0.12) if self.training else 1.0
         for i, j in enumerate(idx):
             img = Image.open(paths[j]).convert("RGB").resize(
                 (self.frame_size, self.frame_size), Image.BILINEAR)
             arr = np.asarray(img, dtype=np.float32) / 255.0
+            if self.training:
+                arr = np.clip((arr - 0.5) * contrast + 0.5 + bright, 0.0, 1.0)
+                if do_flip:
+                    arr = arr[:, ::-1, :]
             arr = (arr - _IMG_MEAN) / _IMG_STD
-            out[i] = arr.transpose(2, 0, 1)
+            out[i] = np.ascontiguousarray(arr.transpose(2, 0, 1))
         return out
 
     def _sample_indices(self, n_available: int) -> List[int]:

@@ -1,0 +1,55 @@
+seed: 42
+
+# ===== STRONG training — full data, UNFROZEN backbone, more epochs =====
+# Goal: maximise honest AUC (the frozen-backbone/small-subset runs capped ~0.76).
+# Key changes vs trust_on.yaml: backbone_freeze=false, full manifests, 25 epochs.
+data:
+  manifest_train: manifests/train.extracted.csv     # FULL train (not the subset)
+  manifest_val: manifests/val.extracted.csv
+  manifest_test: manifests/test.extracted.csv
+  frame_root: frames/
+  audio_root: audio/
+  num_frames: 16
+  frame_size: 224
+  audio_sample_rate: 16000
+  audio_seconds: 4.0
+  num_workers: 2
+  batch_size: 6
+
+model:
+  backbone: efficientnet_b0
+  backbone_freeze: false          # <-- UNFROZEN: the biggest change. Learns artifacts.
+  patch_size: 16
+  embed_dim: 384
+  spatial_depth: 6
+  temporal_depth: 4
+  num_heads: 6
+  mlp_ratio: 4.0
+  dropout: 0.1
+  audio_embed_dim: 256
+  fusion_dim: 512
+  fusion_depth: 2
+  fusion_heads: 8
+  max_audio_tokens: 256
+  audio_encoder: wav2vec
+  wav2vec_pretrained: facebook/wav2vec2-base
+  wav2vec_freeze: true
+  use_physio: true
+  physio_embed_dim: 128
+  physio_fps: 4.0
+  # reliability ON (our full TRUSTFUSE model)
+  use_trust: true
+  trust_dim: 128
+  trust_tau: 0.5
+
+train:
+  epochs: 25
+  lr: 5.0e-5                       # lower LR — safe fine-tuning of the unfrozen backbone
+  weight_decay: 0.05
+  warmup_epochs: 3
+  grad_clip: 1.0
+  amp: true
+  log_dir: runs/strong_cdf/
+  ckpt_dir: checkpoints/strong_cdf/
+  sync_loss_weight: 0.2
+  trust_loss_weight: 0.1
